@@ -1,0 +1,42 @@
+[package]
+name = "clankervm-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Hook server for supervising commands in AWS Lambda MicroVMs"
+license = "MIT"
+repository = "https://github.com/jcarver989/clankervm"
+homepage = "https://github.com/jcarver989/clankervm"
+readme = "README.md"
+keywords = ["aws", "lambda", "microvm", "hooks", "server"]
+categories = ["command-line-utilities", "development-tools"]
+
+[package.metadata.dist]
+dist = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "clankervm_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clankervm-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+clap = { workspace = true }
+nix = { workspace = true, features = ["process", "signal"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "process", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = { workspace = true }
