@@ -1,0 +1,39 @@
+[package]
+name = "clankervm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Build and run arbitrary commands in AWS Lambda MicroVMs"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["aws", "lambda", "microvm", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "clankervm"
+
+[[bin]]
+name = "clankervm"
+path = "src/main.rs"
+
+[dependencies]
+aws-config = { workspace = true }
+aws-sdk-lambdamicrovms = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-smithy-types = { workspace = true }
+base16ct = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+zip = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
