@@ -9,6 +9,7 @@ fn help_succeeds() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--port"));
+    assert!(stdout.contains("--terminate-grace-period"));
     assert!(!stdout.contains("--listen"));
     assert!(!stdout.contains("--setup-script"));
 }

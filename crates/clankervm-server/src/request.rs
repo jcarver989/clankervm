@@ -1,3 +1,4 @@
+use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -79,5 +80,5 @@ fn deserialize_run_hook_payload<'a, T: Deserializer<'a>>(
     deserializer: T,
 ) -> Result<RunHookPayload, T::Error> {
     let encoded = String::deserialize(deserializer)?;
-    serde_json::from_str(&encoded).map_err(serde::de::Error::custom)
+    serde_json::from_str(&encoded).map_err(|_| DeError::custom("invalid runHookPayload JSON"))
 }

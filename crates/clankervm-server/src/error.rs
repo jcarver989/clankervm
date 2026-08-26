@@ -13,8 +13,12 @@ pub enum HookServerError {
     Server(#[source] io::Error),
     #[error("invalid log filter: {0}")]
     InvalidLogFilter(#[source] tracing_subscriber::filter::ParseError),
+    #[error("failed to install signal handler: {0}")]
+    Signal(#[source] io::Error),
     #[error("failed to start run command: {0}")]
     CommandSpawn(#[source] io::Error),
+    #[error("failed while signaling run command: {0}")]
+    CommandSignal(#[source] io::Error),
     #[error("failed while waiting for run command: {0}")]
     CommandWait(#[source] io::Error),
     #[error("run command reported failure")]
