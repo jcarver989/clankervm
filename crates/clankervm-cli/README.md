@@ -2,6 +2,17 @@
 
 `clankervm` is a Docker-shaped CLI for building AWS Lambda MicroVM images and running arbitrary commands in them.
 
+## Install
+
+Download a pinned Linux or macOS release with the generated installer:
+
+```sh
+CLANKERVM_VERSION='<VERSION>'
+curl --proto '=https' --tlsv1.2 -LsSf \
+  "https://github.com/jcarver989/clankervm/releases/download/clankervm-v${CLANKERVM_VERSION}/clankervm-installer.sh" \
+  | sh
+```
+
 ## Build
 
 Package a build context, upload it to S3, create or update the named image, and wait for the remote build to finish:

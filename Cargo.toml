@@ -9,6 +9,10 @@ license = "MIT"
 repository = "https://github.com/jcarver989/clankervm"
 homepage = "https://github.com/jcarver989/clankervm"
 
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }

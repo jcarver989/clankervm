@@ -1,0 +1,68 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Generate release automation app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.RELEASE_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: clankervm
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Create release tags
+        uses: release-plz/action@v0.5.131
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Generate release automation app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.RELEASE_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: clankervm
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Open or update the release PR
+        uses: release-plz/action@v0.5.131
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

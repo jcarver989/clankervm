@@ -2,6 +2,19 @@
 
 ClankerVM builds AWS Lambda `MicroVM` images and runs arbitrary commands in them using a Docker-shaped CLI.
 
+## Install
+
+Download a pinned Linux or macOS release with the generated installer:
+
+```sh
+CLANKERVM_VERSION='<VERSION>'
+curl --proto '=https' --tlsv1.2 -LsSf \
+  "https://github.com/jcarver989/clankervm/releases/download/clankervm-v${CLANKERVM_VERSION}/clankervm-installer.sh" \
+  | sh
+```
+
+## Usage
+
 ```sh
 export AWS_REGION=us-east-1
 export AWS_ACCOUNT_ID=123456789012

@@ -17,3 +17,21 @@ fmt:
 
 fmt-check:
     cargo fmt --all -- --check
+
+release-pr-preview:
+    release-plz release-pr --dry-run
+
+dist-generate:
+    dist generate
+
+dist-generate-check:
+    dist generate --check
+
+dist-plan:
+    dist plan
+
+dist-plan-tag tag:
+    dist plan --tag "{{ tag }}"
+
+dist-build:
+    dist build
