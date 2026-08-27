@@ -1,7 +1,8 @@
 use crate::client::{MicroVmClient, RunMicroVmRequest};
 use crate::commands::image_account;
 use crate::config::ProjectConfig;
-use crate::{ClankerError, RunArgs, image_arn};
+use crate::util::{non_empty, parse_release};
+use crate::{Arn, ClankerError, RunArgs};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -66,23 +67,16 @@ pub async fn run<T: MicroVmClient>(
         .expect("JSON is UTF-8");
     let execution_role = args
         .execution_role_arn
-        .filter(|role| !role.is_empty())
-        .or_else(|| {
-            config
-                .run
-                .execution_role_arn
-                .clone()
-                .filter(|role| !role.is_empty())
-        })
+        .and_then(|role| non_empty(Some(&role)).map(str::to_owned))
+        .or_else(|| non_empty(config.run.execution_role_arn.as_deref()).map(str::to_owned))
         .ok_or_else(|| {
             ClankerError::InvalidConfig("run.execution-role-arn must be configured".into())
         })?;
     let account = image_account(config, Some(&execution_role))?;
+    let execution_role = Arn::parse(&execution_role)?;
     let (image_name, image_version) = match args.release.as_deref() {
         Some(release) => {
-            let (name, version) = release
-                .rsplit_once('@')
-                .ok_or_else(|| ClankerError::InvalidRelease(release.into()))?;
+            let (name, version) = parse_release(release)?;
             (name, Some(version.to_owned()))
         }
         None => (config.app.name.as_str(), None),
@@ -103,11 +97,11 @@ pub async fn run<T: MicroVmClient>(
         .unwrap_or(3600);
     let log_group = args.log_group.or_else(|| config.run.log_group.clone());
     let request = RunMicroVmRequest {
-        image_identifier: image_arn(image_name, region, Some(account))?,
+        image_identifier: Arn::image(image_name, region, Some(account))?,
         image_version,
         execution_role_arn: execution_role,
-        ingress_network_connector: network_connector_arn(region, ingress),
-        egress_network_connector: network_connector_arn(region, egress),
+        ingress_network_connector: Arn::network_connector(region, ingress)?,
+        egress_network_connector: Arn::network_connector(region, egress)?,
         run_hook_payload: payload,
         maximum_duration_seconds: max_duration,
         client_token: args.client_token,
@@ -126,12 +120,4 @@ struct Payload<'a> {
     command: &'a str,
     args: &'a [String],
     environment: BTreeMap<&'static str, &'a str>,
-}
-
-pub(crate) fn network_connector_arn(region: &str, connector: &str) -> String {
-    if connector.starts_with("arn:") {
-        connector.to_owned()
-    } else {
-        format!("arn:aws:lambda:{region}:aws:network-connector:aws-network-connector:{connector}")
-    }
 }

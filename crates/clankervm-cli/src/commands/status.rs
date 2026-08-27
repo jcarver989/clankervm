@@ -3,7 +3,8 @@ use crate::client::{
     ImageState, ImageVersionState, ImageVersionStatus, InspectImageRequest, MicroVmClient,
     ObservedImageRelease,
 };
-use crate::{ClankerError, OutputFormat, Project, image_arn};
+use crate::util::parse_release;
+use crate::{Arn, ClankerError, OutputFormat, Project};
 use clap::Args;
 use std::time::{Duration, Instant};
 
@@ -32,9 +33,22 @@ pub(super) async fn execute<T: MicroVmClient>(
     } else if let Some(observed) = observed {
         apply_observation(release, observed)
     } else {
-        inspect_release(client, release).await?
+        match read_observation(client, &release).await? {
+            Some(observed) => apply_observation(release, observed),
+            None => release,
+        }
     };
-    render(format, &result, || status_text(&result))
+    render(format, &result, || {
+        format!(
+            "App:        {}\nRelease:    {}\nImage:      {}\nBuild:      {}\nActivation: {}\nLogs:       {}",
+            result.app,
+            result.release,
+            result.image_state,
+            result.version_state,
+            result.version_status,
+            result.build_log_group
+        )
+    })
 }
 
 async fn resolve_release<T: MicroVmClient>(
@@ -44,13 +58,11 @@ async fn resolve_release<T: MicroVmClient>(
 ) -> Result<(ReleaseStatus, Option<ObservedImageRelease>), ClankerError> {
     let config = project.config();
     if let Some(value) = requested {
-        let (name, version) = value
-            .rsplit_once('@')
-            .ok_or_else(|| ClankerError::InvalidRelease(value.into()))?;
-        let arn = image_arn(name, &config.app.region, Some(image_account(config, None)?))?;
+        let (name, version) = parse_release(value)?;
+        let arn = Arn::image(name, &config.app.region, Some(image_account(config, None)?))?;
         return Ok((pending_release(name, arn, version, None, None), None));
     }
-    let arn = image_arn(
+    let arn = Arn::image(
         &config.app.name,
         &config.app.region,
         Some(image_account(config, None)?),
@@ -61,7 +73,7 @@ async fn resolve_release<T: MicroVmClient>(
             image_version: None,
         })
         .await?
-        .ok_or_else(|| ClankerError::InvalidImage(arn.clone()))?;
+        .ok_or_else(|| ClankerError::InvalidImage(arn.to_string()))?;
     let release = pending_release(&config.app.name, arn, &observed.image_version, None, None);
     Ok((release, Some(observed)))
 }
@@ -119,16 +131,6 @@ pub(super) async fn wait_for_release<T: MicroVmClient>(
     }
 }
 
-async fn inspect_release<T: MicroVmClient>(
-    client: &T,
-    release: ReleaseStatus,
-) -> Result<ReleaseStatus, ClankerError> {
-    Ok(match read_observation(client, &release).await? {
-        Some(observed) => apply_observation(release, observed),
-        None => release,
-    })
-}
-
 async fn read_observation<T: MicroVmClient>(
     client: &T,
     release: &ReleaseStatus,
@@ -152,7 +154,7 @@ fn apply_observation(mut release: ReleaseStatus, observed: ObservedImageRelease)
 
 pub(super) fn pending_release(
     app: &str,
-    image_arn: String,
+    image_arn: Arn,
     image_version: &str,
     bundle_digest: Option<String>,
     artifact_uri: Option<String>,
@@ -202,16 +204,4 @@ pub(super) fn duration_or(
     humantime::parse_duration(value).map_err(|error| {
         ClankerError::InvalidConfig(format!("invalid duration `{value}`: {error}"))
     })
-}
-
-fn status_text(status: &ReleaseStatus) -> String {
-    format!(
-        "App:        {}\nRelease:    {}\nImage:      {}\nBuild:      {}\nActivation: {}\nLogs:       {}",
-        status.app,
-        status.release,
-        status.image_state,
-        status.version_state,
-        status.version_status,
-        status.build_log_group
-    )
 }

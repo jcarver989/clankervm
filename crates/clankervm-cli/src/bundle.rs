@@ -1,6 +1,5 @@
-use base16ct::lower::encode_string;
+use crate::util::sha256_hex;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{self, Cursor};
 use std::os::unix::fs::PermissionsExt;
@@ -19,7 +18,7 @@ pub struct ZipBundle {
 impl ZipBundle {
     pub fn from_path(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
-        let digest = encode_string(Sha256::digest(&bytes).as_ref());
+        let digest = sha256_hex(&bytes);
         Ok(Self { bytes, digest })
     }
 }
@@ -59,7 +58,7 @@ pub(crate) fn create_zip_bundle(context: &Path) -> io::Result<ZipBundle> {
         zip.finish().map_err(zip_error)?;
     }
     let bytes = output.into_inner();
-    let digest = encode_string(Sha256::digest(&bytes).as_ref());
+    let digest = sha256_hex(&bytes);
     Ok(ZipBundle { bytes, digest })
 }
 

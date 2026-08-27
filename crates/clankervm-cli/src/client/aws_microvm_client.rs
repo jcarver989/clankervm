@@ -4,15 +4,19 @@ use super::microvm_client::{
     InspectImageRequest, MicroVmClient, ObservedImageRelease, PruneImageVersionsRequest,
     PublishImageRequest, PublishedImage, RunMicroVmRequest, RunMicroVmResponse,
 };
+use crate::{Arn, Tags};
 use aws_config::SdkConfig;
-use aws_sdk_lambdamicrovms::operation::get_microvm_image::GetMicrovmImageError;
-use aws_sdk_lambdamicrovms::operation::get_microvm_image_version::GetMicrovmImageVersionError;
+use aws_sdk_lambdamicrovms::operation::get_microvm_image::{
+    GetMicrovmImageError, GetMicrovmImageOutput,
+};
+use aws_sdk_lambdamicrovms::operation::get_microvm_image_version::{
+    GetMicrovmImageVersionError, GetMicrovmImageVersionOutput,
+};
 use aws_sdk_lambdamicrovms::types::{
     CloudWatchLogging, CodeArtifact, HookState, Hooks, Logging, MicrovmHooks, MicrovmImageHooks,
     Resources,
 };
 use aws_sdk_s3::primitives::ByteStream;
-use std::collections::BTreeMap;
 
 #[derive(Clone)]
 pub struct AwsMicroVmClient {
@@ -52,19 +56,18 @@ impl AwsMicroVmClient {
         Ok(uri)
     }
 
-    async fn image_state(
+    async fn get_image(
         &self,
         image_identifier: &str,
-    ) -> Result<Option<ImageState>, MicroVmClientError> {
-        let output = self
+    ) -> Result<Option<GetMicrovmImageOutput>, MicroVmClientError> {
+        match self
             .microvms
             .get_microvm_image()
             .image_identifier(image_identifier)
             .send()
-            .await;
-
-        match output {
-            Ok(output) => Ok(Some(ImageState::from_aws(output.state().as_str()))),
+            .await
+        {
+            Ok(output) => Ok(Some(output)),
             Err(error)
                 if error
                     .as_service_error()
@@ -73,6 +76,31 @@ impl AwsMicroVmClient {
                 Ok(None)
             }
             Err(error) => Err(MicroVmClientError::service("get image", error)),
+        }
+    }
+
+    async fn get_image_version(
+        &self,
+        image_identifier: &str,
+        image_version: &str,
+    ) -> Result<Option<GetMicrovmImageVersionOutput>, MicroVmClientError> {
+        match self
+            .microvms
+            .get_microvm_image_version()
+            .image_identifier(image_identifier)
+            .image_version(image_version)
+            .send()
+            .await
+        {
+            Ok(output) => Ok(Some(output)),
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(GetMicrovmImageVersionError::is_resource_not_found_exception) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(MicroVmClientError::service("get image version", error)),
         }
     }
 
@@ -87,12 +115,14 @@ impl AwsMicroVmClient {
             .create_microvm_image()
             .name(&request.name)
             .code_artifact(CodeArtifact::Uri(artifact_uri.into()))
-            .base_image_arn(&configuration.base_image_arn)
-            .build_role_arn(&configuration.build_role_arn)
+            .base_image_arn(configuration.base_image_arn.as_str())
+            .build_role_arn(configuration.build_role_arn.as_str())
             .description(&configuration.description)
-            .egress_network_connectors(&configuration.egress_network_connector)
+            .egress_network_connectors(configuration.egress_network_connector.as_str())
             .hooks(aws_hooks(&configuration.hooks))
-            .set_tags(Some(request.tags.clone().into_iter().collect()));
+            .set_tags(Some(
+                request.tags.clone().into_inner().into_iter().collect(),
+            ));
 
         if let Some(memory) = configuration.minimum_memory_mib {
             builder = builder.resources(aws_resources(memory, "create image")?);
@@ -118,12 +148,12 @@ impl AwsMicroVmClient {
         let mut builder = self
             .microvms
             .update_microvm_image()
-            .image_identifier(&request.image_identifier)
+            .image_identifier(request.image_identifier.as_str())
             .code_artifact(CodeArtifact::Uri(artifact_uri.into()))
-            .base_image_arn(&configuration.base_image_arn)
-            .build_role_arn(&configuration.build_role_arn)
+            .base_image_arn(configuration.base_image_arn.as_str())
+            .build_role_arn(configuration.build_role_arn.as_str())
             .description(&configuration.description)
-            .egress_network_connectors(&configuration.egress_network_connector)
+            .egress_network_connectors(configuration.egress_network_connector.as_str())
             .hooks(aws_hooks(&configuration.hooks));
 
         if let Some(memory) = configuration.minimum_memory_mib {
@@ -143,16 +173,16 @@ impl AwsMicroVmClient {
 
     async fn tag_image(
         &self,
-        image_identifier: &str,
-        tags: BTreeMap<String, String>,
+        image_identifier: &Arn,
+        tags: Tags,
     ) -> Result<(), MicroVmClientError> {
         if tags.is_empty() {
             return Ok(());
         }
         self.microvms
             .tag_resource()
-            .resource(image_identifier)
-            .set_tags(Some(tags.into_iter().collect()))
+            .resource(image_identifier.as_str())
+            .set_tags(Some(tags.into_inner().into_iter().collect()))
             .send()
             .await
             .map_err(|error| MicroVmClientError::service("tag image", error))?;
@@ -166,7 +196,10 @@ impl MicroVmClient for AwsMicroVmClient {
         request: PublishImageRequest,
     ) -> Result<PublishedImage, MicroVmClientError> {
         let artifact_uri = self.upload_bundle(&request).await?;
-        let exists = self.image_state(&request.image_identifier).await?.is_some();
+        let exists = self
+            .get_image(request.image_identifier.as_str())
+            .await?
+            .is_some();
         let image_version = if exists {
             let image_version = self.update_image(&request, &artifact_uri).await?;
             self.tag_image(&request.image_identifier, request.tags.clone())
@@ -185,22 +218,8 @@ impl MicroVmClient for AwsMicroVmClient {
         &self,
         request: InspectImageRequest,
     ) -> Result<Option<ObservedImageRelease>, MicroVmClientError> {
-        let image = self
-            .microvms
-            .get_microvm_image()
-            .image_identifier(&request.image_identifier)
-            .send()
-            .await;
-        let image = match image {
-            Ok(image) => image,
-            Err(error)
-                if error
-                    .as_service_error()
-                    .is_some_and(GetMicrovmImageError::is_resource_not_found_exception) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(MicroVmClientError::service("get image", error)),
+        let Some(image) = self.get_image(request.image_identifier.as_str()).await? else {
+            return Ok(None);
         };
         let image_state = ImageState::from_aws(image.state().as_str());
         let image_version = request
@@ -210,23 +229,11 @@ impl MicroVmClient for AwsMicroVmClient {
         let Some(image_version) = image_version else {
             return Ok(None);
         };
-        let version = self
-            .microvms
-            .get_microvm_image_version()
-            .image_identifier(&request.image_identifier)
-            .image_version(&image_version)
-            .send()
-            .await;
-        let version = match version {
-            Ok(version) => version,
-            Err(error)
-                if error
-                    .as_service_error()
-                    .is_some_and(GetMicrovmImageVersionError::is_resource_not_found_exception) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(MicroVmClientError::service("get image version", error)),
+        let Some(version) = self
+            .get_image_version(request.image_identifier.as_str(), &image_version)
+            .await?
+        else {
+            return Ok(None);
         };
         let version_state = ImageVersionState::from_aws(version.state().as_str());
         let version_status = ImageVersionStatus::from_aws(version.status().as_str());
@@ -252,7 +259,7 @@ impl MicroVmClient for AwsMicroVmClient {
             let output = self
                 .microvms
                 .list_microvm_image_versions()
-                .image_identifier(&request.image_identifier)
+                .image_identifier(request.image_identifier.as_str())
                 .max_results(50)
                 .set_next_token(token)
                 .send()
@@ -274,7 +281,7 @@ impl MicroVmClient for AwsMicroVmClient {
             }
             self.microvms
                 .delete_microvm_image_version()
-                .image_identifier(&request.image_identifier)
+                .image_identifier(request.image_identifier.as_str())
                 .image_version(version.image_version())
                 .send()
                 .await
@@ -291,11 +298,11 @@ impl MicroVmClient for AwsMicroVmClient {
         let mut builder = self
             .microvms
             .run_microvm()
-            .image_identifier(request.image_identifier)
+            .image_identifier(request.image_identifier.into_string())
             .set_image_version(request.image_version)
-            .execution_role_arn(request.execution_role_arn)
-            .ingress_network_connectors(request.ingress_network_connector)
-            .egress_network_connectors(request.egress_network_connector)
+            .execution_role_arn(request.execution_role_arn.as_str())
+            .ingress_network_connectors(request.ingress_network_connector.into_string())
+            .egress_network_connectors(request.egress_network_connector.into_string())
             .run_hook_payload(request.run_hook_payload)
             .maximum_duration_in_seconds(request.maximum_duration_seconds)
             .set_client_token(request.client_token);

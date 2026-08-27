@@ -1,16 +1,19 @@
+mod arn;
 mod bundle;
 mod client;
 mod commands;
 mod config;
 mod project;
 mod runtime;
+mod tags;
+mod util;
 
-use aws_config::{BehaviorVersion, Region};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
 
+pub use arn::Arn;
 pub use bundle::ZipBundle;
 pub use client::{
     AwsMicroVmClient, FakeMicroVmClient, FakeMicroVmClientBuilder, ImageCapability,
@@ -23,6 +26,7 @@ pub use commands::{Command, InitArgs, PushArgs, ReleaseStatus, RunArgs, StatusAr
 pub use config::ProjectConfig;
 pub use project::Project;
 pub use runtime::{PayloadError, RunResult, build_run_payload};
+pub use tags::Tags;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -74,6 +78,8 @@ pub enum ClankerError {
     InvalidRelease(String),
     #[error("invalid image `{0}`")]
     InvalidImage(String),
+    #[error("invalid ARN `{0}`")]
+    InvalidArn(String),
     #[error(transparent)]
     MicroVmClient(#[from] MicroVmClientError),
     #[error("release {release} failed: {reason}\nBuild logs: {log_group}")]
@@ -98,26 +104,10 @@ pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
     commands::execute(cli.command, cli.config, cli.format, cli.region).await
 }
 
-pub(crate) async fn sdk_for(config: &ProjectConfig) -> aws_config::SdkConfig {
-    aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new(config.app.region.clone()))
-        .load()
-        .await
-}
-
 pub fn image_arn(
     image: &str,
     region: &str,
     account_id: Option<&str>,
 ) -> Result<String, ClankerError> {
-    if image.starts_with("arn:") {
-        return Ok(image.to_owned());
-    }
-    if image.is_empty() {
-        return Err(ClankerError::InvalidImage(image.into()));
-    }
-    let account_id = account_id.ok_or_else(|| ClankerError::InvalidImage(image.into()))?;
-    Ok(format!(
-        "arn:aws:lambda:{region}:{account_id}:microvm-image:{image}"
-    ))
+    Ok(Arn::image(image, region, account_id)?.into_string())
 }

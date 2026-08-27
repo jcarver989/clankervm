@@ -1,11 +1,11 @@
 use crate::client::ImageCapability;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::ClankerError;
+use crate::Tags;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -91,29 +91,9 @@ impl ProjectConfig {
                 "app.region must not be empty".into(),
             ));
         }
-        parse_tags(&config.push.tags)?;
+        Tags::parse(&config.push.tags)?;
         Ok(config)
     }
-}
-
-pub fn parse_tags(values: &[String]) -> Result<BTreeMap<String, String>, ClankerError> {
-    let mut tags = BTreeMap::new();
-    for value in values {
-        let (key, tag_value) = value.split_once('=').ok_or_else(|| {
-            ClankerError::InvalidConfig(format!("invalid tag `{value}`; expected key=value"))
-        })?;
-        if key.is_empty() || tag_value.is_empty() {
-            return Err(ClankerError::InvalidConfig(format!(
-                "invalid tag `{value}`; key and value must not be empty"
-            )));
-        }
-        if tags.insert(key.to_owned(), tag_value.to_owned()).is_some() {
-            return Err(ClankerError::InvalidConfig(format!(
-                "duplicate tag key `{key}`"
-            )));
-        }
-    }
-    Ok(tags)
 }
 
 impl Default for PushConfig {
@@ -206,7 +186,10 @@ tags = ["team=platform"]
     fn capabilities_and_tags_use_flat_push_schema() {
         let config: ProjectConfig = toml::from_str(CONFIG).unwrap();
         assert_eq!(config.push.capabilities, [ImageCapability::All]);
-        assert_eq!(parse_tags(&config.push.tags).unwrap()["team"], "platform");
+        assert_eq!(
+            Tags::parse(&config.push.tags).unwrap().get("team"),
+            Some("platform")
+        );
         assert!(
             toml::to_string(&config)
                 .unwrap()
@@ -222,7 +205,7 @@ tags = ["team=platform"]
             vec!["key=".into()],
             vec!["key=a".into(), "key=b".into()],
         ] {
-            assert!(parse_tags(&tags).is_err());
+            assert!(Tags::parse(&tags).is_err());
         }
     }
 

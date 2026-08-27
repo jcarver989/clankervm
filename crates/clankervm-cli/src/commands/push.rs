@@ -1,12 +1,12 @@
 use super::status::{duration_or, pending_release, wait_for_release};
-use super::{ReleaseStatus, image_account, render};
+use super::{image_account, render};
 use crate::bundle::{ZipBundle, create_zip_bundle};
 use crate::client::{
     ImageConfiguration, ImageHooks, MicroVmClient, PruneImageVersionsRequest, PublishImageRequest,
 };
-use crate::config::{ProjectConfig, parse_tags};
-use crate::runtime::network_connector_arn;
-use crate::{ClankerError, OutputFormat, Project, image_arn};
+use crate::config::ProjectConfig;
+use crate::util::non_empty;
+use crate::{Arn, ClankerError, OutputFormat, Project, Tags};
 use clap::Args;
 use std::path::PathBuf;
 
@@ -56,8 +56,11 @@ pub(super) async fn execute<T: MicroVmClient>(
     let bundle_path = args.bundle.clone();
     let config = effective_config(args, project.config())?;
     let bundle = load_bundle(bundle_path.as_deref(), &config, project)?;
-    let role = required(config.push.build_role_arn.as_deref(), "push.build-role-arn")?;
-    let identifier = image_arn(
+    let role = Arn::parse(required(
+        config.push.build_role_arn.as_deref(),
+        "push.build-role-arn",
+    )?)?;
+    let identifier = Arn::image(
         &config.app.name,
         &config.app.region,
         Some(image_account(&config, None)?),
@@ -66,7 +69,10 @@ pub(super) async fn execute<T: MicroVmClient>(
         config.push.artifact_bucket.as_deref(),
         "push.artifact-bucket",
     )?;
-    eprintln!("› Publishing bundle {}", short(&bundle.digest));
+    eprintln!(
+        "› Publishing bundle {}",
+        &bundle.digest[..bundle.digest.len().min(12)]
+    );
     let published = client
         .publish_image(PublishImageRequest {
             image_identifier: identifier.clone(),
@@ -74,8 +80,8 @@ pub(super) async fn execute<T: MicroVmClient>(
             bundle: bundle.bytes,
             bundle_digest: bundle.digest.clone(),
             artifact_bucket: artifact_bucket.into(),
-            configuration: resolve_image_configuration(&config, &bundle.digest, role),
-            tags: parse_tags(&config.push.tags)?,
+            configuration: resolve_image_configuration(&config, &bundle.digest, &role)?,
+            tags: Tags::parse(&config.push.tags)?,
         })
         .await?;
     let release = pending_release(
@@ -94,7 +100,7 @@ pub(super) async fn execute<T: MicroVmClient>(
             })
             .await?;
     }
-    render(format, &result, || release_text(&result))
+    render(format, &result, || format!("✓ Released {}", result.release))
 }
 
 fn effective_config(args: PushArgs, config: &ProjectConfig) -> Result<ProjectConfig, ClankerError> {
@@ -150,7 +156,7 @@ fn effective_config(args: PushArgs, config: &ProjectConfig) -> Result<ProjectCon
     if let Some(value) = args.timeout {
         push.timeout = duration_or(Some(&value), push.timeout)?;
     }
-    parse_tags(&push.tags)?;
+    Tags::parse(&push.tags)?;
     Ok(config)
 }
 
@@ -176,45 +182,31 @@ fn load_bundle(
 fn resolve_image_configuration(
     config: &ProjectConfig,
     digest: &str,
-    role: &str,
-) -> ImageConfiguration {
-    ImageConfiguration {
-        base_image_arn: base_image_arn(
+    role: &Arn,
+) -> Result<ImageConfiguration, ClankerError> {
+    Ok(ImageConfiguration {
+        base_image_arn: Arn::base_image(
             &config.app.region,
             config.push.base_image.as_deref().unwrap_or("al2023-1"),
-        ),
-        build_role_arn: role.into(),
+        )?,
+        build_role_arn: role.clone(),
         description: format!("Bundle {digest}"),
         minimum_memory_mib: config.push.minimum_memory_mib,
         capabilities: config.push.capabilities.clone(),
-        egress_network_connector: network_connector_arn(
+        egress_network_connector: Arn::network_connector(
             &config.app.region,
             config.push.egress.as_deref().unwrap_or("INTERNET_EGRESS"),
-        ),
+        )?,
         hooks: ImageHooks {
             port: config.push.port,
             ready_timeout_seconds: config.push.ready_timeout_seconds,
             run_timeout_seconds: config.push.run_timeout_seconds,
             terminate_timeout_seconds: config.push.terminate_timeout_seconds,
         },
-    }
+    })
 }
 
 fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, ClankerError> {
-    value
-        .filter(|value| !value.is_empty())
+    non_empty(value)
         .ok_or_else(|| ClankerError::InvalidConfig(format!("{name} must be configured")))
-}
-fn short(value: &str) -> &str {
-    &value[..value.len().min(12)]
-}
-fn base_image_arn(region: &str, image: &str) -> String {
-    if image.starts_with("arn:") {
-        image.into()
-    } else {
-        format!("arn:aws:lambda:{region}:aws:microvm-image:{image}")
-    }
-}
-fn release_text(status: &ReleaseStatus) -> String {
-    format!("✓ Released {}", status.release)
 }

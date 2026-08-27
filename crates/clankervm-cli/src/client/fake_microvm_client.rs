@@ -157,7 +157,10 @@ mod tests {
             .inspection_responses([Ok(None), Ok(Some(observed.clone()))])
             .build();
         let request = InspectImageRequest {
-            image_identifier: "image".into(),
+            image_identifier: crate::Arn::parse(
+                "arn:aws:lambda:region:account:microvm-image:image",
+            )
+            .unwrap(),
             image_version: Some("2".into()),
         };
 

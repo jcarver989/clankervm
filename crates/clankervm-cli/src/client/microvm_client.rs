@@ -1,5 +1,5 @@
 use super::error::MicroVmClientError;
-use std::collections::BTreeMap;
+use crate::{Arn, Tags};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImageCapability {
@@ -24,12 +24,12 @@ pub struct ImageHooks {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageConfiguration {
-    pub base_image_arn: String,
-    pub build_role_arn: String,
+    pub base_image_arn: Arn,
+    pub build_role_arn: Arn,
     pub description: String,
     pub minimum_memory_mib: Option<i32>,
     pub capabilities: Vec<ImageCapability>,
-    pub egress_network_connector: String,
+    pub egress_network_connector: Arn,
     pub hooks: ImageHooks,
 }
 
@@ -131,13 +131,13 @@ impl ImageVersionStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishImageRequest {
-    pub image_identifier: String,
+    pub image_identifier: Arn,
     pub name: String,
     pub bundle: Vec<u8>,
     pub bundle_digest: String,
     pub artifact_bucket: String,
     pub configuration: ImageConfiguration,
-    pub tags: BTreeMap<String, String>,
+    pub tags: Tags,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,7 +148,7 @@ pub struct PublishedImage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InspectImageRequest {
-    pub image_identifier: String,
+    pub image_identifier: Arn,
     pub image_version: Option<String>,
 }
 
@@ -163,17 +163,17 @@ pub struct ObservedImageRelease {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PruneImageVersionsRequest {
-    pub image_identifier: String,
+    pub image_identifier: Arn,
     pub versions_to_keep: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunMicroVmRequest {
-    pub image_identifier: String,
+    pub image_identifier: Arn,
     pub image_version: Option<String>,
-    pub execution_role_arn: String,
-    pub ingress_network_connector: String,
-    pub egress_network_connector: String,
+    pub execution_role_arn: Arn,
+    pub ingress_network_connector: Arn,
+    pub egress_network_connector: Arn,
     pub run_hook_payload: String,
     pub maximum_duration_seconds: i32,
     pub client_token: Option<String>,
