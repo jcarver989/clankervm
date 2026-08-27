@@ -1,20 +1,30 @@
-use aws_sdk_lambdamicrovms::types::{HookState, Hooks, MicrovmHooks, MicrovmImageHooks};
 use base16ct::lower::encode_string;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{self, Cursor};
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-pub struct ContextArtifact {
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZipBundle {
+    #[serde(skip)]
     pub bytes: Vec<u8>,
     pub digest: String,
 }
 
-pub fn zip_context(context: &Path) -> io::Result<ContextArtifact> {
+impl ZipBundle {
+    pub fn from_path(path: &Path) -> io::Result<Self> {
+        let bytes = fs::read(path)?;
+        let digest = encode_string(Sha256::digest(&bytes).as_ref());
+        Ok(Self { bytes, digest })
+    }
+}
+
+pub(crate) fn create_zip_bundle(context: &Path) -> io::Result<ZipBundle> {
     let mut paths = Vec::new();
     collect(context, &mut paths)?;
     paths.sort();
@@ -24,14 +34,9 @@ pub fn zip_context(context: &Path) -> io::Result<ContextArtifact> {
         for path in paths {
             let metadata = fs::symlink_metadata(&path)?;
             let relative = path.strip_prefix(context).expect("collected from context");
-            let mut name = relative
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/");
+            let mut name = relative.to_string_lossy().replace(MAIN_SEPARATOR, "/");
             let mut options = SimpleFileOptions::default();
-            #[cfg(unix)]
-            {
-                options = options.unix_permissions(metadata.permissions().mode());
-            }
+            options = options.unix_permissions(metadata.permissions().mode());
 
             if metadata.is_symlink() {
                 let target = fs::read_link(&path)?;
@@ -47,7 +52,7 @@ pub fn zip_context(context: &Path) -> io::Result<ContextArtifact> {
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("unsupported build context entry: {}", path.display()),
+                    format!("unsupported bundle context entry: {}", path.display()),
                 ));
             }
         }
@@ -55,31 +60,7 @@ pub fn zip_context(context: &Path) -> io::Result<ContextArtifact> {
     }
     let bytes = output.into_inner();
     let digest = encode_string(Sha256::digest(&bytes).as_ref());
-    Ok(ContextArtifact { bytes, digest })
-}
-
-pub fn hooks(port: i32, ready_timeout: i32, run_timeout: i32, terminate_timeout: i32) -> Hooks {
-    Hooks::builder()
-        .port(port)
-        .microvm_image_hooks(
-            MicrovmImageHooks::builder()
-                .ready(HookState::Enabled)
-                .ready_timeout_in_seconds(ready_timeout)
-                .build(),
-        )
-        .microvm_hooks(
-            MicrovmHooks::builder()
-                .run(HookState::Enabled)
-                .run_timeout_in_seconds(run_timeout)
-                .terminate(HookState::Enabled)
-                .terminate_timeout_in_seconds(terminate_timeout)
-                .build(),
-        )
-        .build()
-}
-
-fn zip_error(error: zip::result::ZipError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
+    Ok(ZipBundle { bytes, digest })
 }
 
 fn collect(directory: &Path, output: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -93,4 +74,31 @@ fn collect(directory: &Path, output: &mut Vec<PathBuf>) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn zip_error(error: zip::result::ZipError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn bundle_is_recursive_and_reproducible() {
+        let directory = TempDir::new().unwrap();
+        fs::create_dir(directory.path().join("nested")).unwrap();
+        fs::create_dir(directory.path().join("empty")).unwrap();
+        fs::write(directory.path().join("nested/file"), "content").unwrap();
+
+        let first = create_zip_bundle(directory.path()).unwrap();
+        let second = create_zip_bundle(directory.path()).unwrap();
+
+        assert_eq!(first.digest, second.digest);
+        assert_eq!(first.bytes, second.bytes);
+        let mut archive = zip::ZipArchive::new(Cursor::new(first.bytes)).unwrap();
+        assert!(archive.by_name("nested/file").is_ok());
+        assert!(archive.by_name("empty/").is_ok());
+    }
 }

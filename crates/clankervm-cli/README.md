@@ -1,58 +1,99 @@
-# ClankerVM
+# ClankerVM CLI
 
-`clankervm` is a Docker-shaped CLI for building AWS Lambda MicroVM images and running arbitrary commands in them.
+`clankervm` bundles, releases, inspects, and runs AWS Lambda MicroVM applications.
 
-## Install
-
-Download a pinned Linux or macOS release with the generated installer:
+## Quick start
 
 ```sh
-CLANKERVM_VERSION='<VERSION>'
-curl --proto '=https' --tlsv1.2 -LsSf \
-  "https://github.com/jcarver989/clankervm/releases/download/clankervm-v${CLANKERVM_VERSION}/clankervm-installer.sh" \
-  | sh
-```
-
-## Build
-
-Package a build context, upload it to S3, create or update the named image, and wait for the remote build to finish:
-
-```sh
-clankervm build -t my-runner \
+clankervm init --name my-runner --region us-west-2 \
   --artifact-bucket "$BUCKET" \
   --build-role-arn "$BUILD_ROLE_ARN" \
-  ./image
+  --execution-role-arn "$EXECUTION_ROLE_ARN"
+clankervm push
+clankervm run -- echo 'hello from a MicroVM'
 ```
 
-The context is packaged recursively without assuming a particular repository, language, or application. Artifacts are named by their SHA-256 digest. Pass `--no-wait` to return after AWS accepts the create or update request.
+AWS credentials use the standard AWS SDK credential chain and are never stored in the project file. If any required deployment values are omitted from `init`, it writes their keys with empty-string placeholders so the generated file remains an explicit checklist.
+
+## Configuration (schema version 1)
+
+`clankervm.toml` keeps application identity in `[app]`. Push defaults are flat under `[push]`; lifecycle hook settings are also part of `[push]`. Status waiting has its own independent timeout under `[status]`.
+
+```toml
+schema-version = 1
+
+[app]
+name = "my-runner"
+region = "us-west-2"
+
+[push]
+context = "image"
+artifact-bucket = "my-microvm-artifacts"
+build-role-arn = "arn:aws:iam::123456789012:role/MicroVmBuildRole"
+base-image = "al2023-1"
+minimum-memory-mib = 4096
+capabilities = ["ALL"]
+egress = "INTERNET_EGRESS"
+keep-versions = 3
+tags = ["imageName=my-runner", "team=platform"]
+port = 9000
+ready-timeout-seconds = 300
+run-timeout-seconds = 60
+terminate-timeout-seconds = 30
+timeout = "1h"
+
+[status]
+timeout = "1h"
+
+[run]
+execution-role-arn = "arn:aws:iam::123456789012:role/MicroVmExecutionRole"
+log-group = "/my-runner/microvms"
+max-duration = 3600
+ingress = "NO_INGRESS"
+egress = "INTERNET_EGRESS"
+```
+
+All push settings have corresponding `push` flags. For example:
+
+```sh
+clankervm push --context image --base-image al2023-1 \
+  --artifact-bucket "$BUCKET" --build-role-arn "$BUILD_ROLE_ARN" \
+  --tag imageName=my-runner --tag team=platform
+```
+
+For every setting, command-line values take precedence over TOML values, which take precedence over built-in defaults. `--bundle PATH` is intentionally invocation-only and supplies an existing ZIP instead of `[push].context`. Tags must be `key=value`; malformed and duplicate tag keys are rejected. Unknown configuration fields are rejected.
+
+ClankerVM does not compile or prepare application assets. Prepare the directory configured by `push.context` with Docker, a shell script, `just`, Bazel, Nix, or another build system first.
+
+## Push
+
+`push` creates a deterministic ZIP from `push.context`, uploads it under an immutable content-addressed S3 key, creates or updates the image, and waits for the exact version returned by AWS. After activation, `keep-versions = N` deletes inactive versions beyond the newest N.
+
+```sh
+clankervm push
+clankervm push --bundle path/to/image.zip
+```
+
+## Status
+
+```sh
+clankervm status
+clankervm status my-runner@42
+clankervm status --wait my-runner@42
+clankervm status --wait --timeout 10m my-runner@42
+```
+
+`status --wait` uses `--timeout` over `[status].timeout`; it never uses the push timeout.
 
 ## Run
 
-Run a command using Docker-style `IMAGE COMMAND ARG...` syntax:
-
 ```sh
-clankervm run \
-  --execution-role-arn "$EXECUTION_ROLE_ARN" \
-  --env-file runtime.env \
-  my-runner \
-  /usr/local/bin/my-job --job-id 42
+clankervm run -- /usr/local/bin/my-job --job-id 42
+clankervm run --release my-runner@42 --client-token "$RUN_ID" -- ./job
 ```
 
-Arguments beginning with `-` after the image are passed to the command. Use `-e NAME=value`, `-e NAME`, or `--env-file PATH` to provide environment variables. `-e NAME` requires that variable in the host environment, and explicit `-e` entries override values loaded from `--env-file`. The selected region is authoritative for `AWS_REGION` and `AWS_DEFAULT_REGION` inside the job.
+Run flags mirror `[run]` keys, including `--max-duration` and `max-duration`. The explicit command and arguments share AWS's 4096-byte run-hook payload limit.
 
-A local script can be embedded in the AWS run-hook payload:
+## JSON output
 
-```sh
-clankervm run \
-  --execution-role-arn "$EXECUTION_ROLE_ARN" \
-  --script ./job.sh \
-  my-runner arg1 arg2
-```
-
-The complete command, arguments, script, and environment must fit within AWS's 4096-byte run-hook payload limit. Payload-size errors list environment keys but never values.
-
-## Configuration
-
-`AWS_REGION` is required. Image names also require `AWS_ACCOUNT_ID`; a complete image ARN does not. Infrastructure flags support corresponding `CLANKERVM_*` environment variables shown by `clankervm build --help` and `clankervm run --help`.
-
-The image must run `clankervm-server` on the same port configured during `clankervm build`.
+Use `--format json` for stable JSON on stdout. Human progress is written to stderr.

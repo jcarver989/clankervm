@@ -1,0 +1,23 @@
+schema-version = 1
+
+[app]
+name = "foo"
+region = "us-west-2"
+
+[push]
+context = "."
+artifact-bucket = ""
+build-role-arn = ""
+capabilities = []
+tags = []
+port = 9000
+ready-timeout-seconds = 300
+run-timeout-seconds = 60
+terminate-timeout-seconds = 30
+timeout = "1h"
+
+[status]
+timeout = "1h"
+
+[run]
+execution-role-arn = ""
