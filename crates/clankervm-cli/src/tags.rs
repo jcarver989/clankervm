@@ -29,10 +29,6 @@ impl Tags {
         self.0.is_empty()
     }
 
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).map(String::as_str)
-    }
-
     pub fn into_inner(self) -> BTreeMap<String, String> {
         self.0
     }

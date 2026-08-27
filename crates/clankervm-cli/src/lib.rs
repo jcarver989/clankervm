@@ -3,9 +3,12 @@ mod bundle;
 mod client;
 mod commands;
 mod config;
-mod project;
-mod runtime;
+mod output;
+mod payload;
+mod release;
 mod tags;
+#[cfg(test)]
+mod test_support;
 mod util;
 
 use clap::{Parser, ValueEnum};
@@ -13,20 +16,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
 
-pub use arn::Arn;
-pub use bundle::ZipBundle;
-pub use client::{
-    AwsMicroVmClient, FakeMicroVmClient, FakeMicroVmClientBuilder, ImageCapability,
-    ImageConfiguration, ImageHooks, ImageState, ImageVersionState, ImageVersionStatus,
-    InspectImageRequest, MicroVmCall, MicroVmClient, MicroVmClientError, ObservedImageRelease,
-    PruneImageVersionsRequest, PublishImageRequest, PublishedImage, RunMicroVmRequest,
-    RunMicroVmResponse,
-};
-pub use commands::{Command, InitArgs, PushArgs, ReleaseStatus, RunArgs, StatusArgs};
-pub use config::ProjectConfig;
-pub use project::Project;
-pub use runtime::{PayloadError, RunResult, build_run_payload};
-pub use tags::Tags;
+pub use client::MicroVmClientError;
+pub use commands::Command;
+pub use payload::{PayloadError, build_run_payload};
+
+pub(crate) use arn::Arn;
+pub(crate) use client::AwsMicroVmClient;
+pub(crate) use config::Project;
+pub(crate) use tags::Tags;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -102,12 +99,4 @@ pub enum ClankerError {
 
 pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
     commands::execute(cli.command, cli.config, cli.format, cli.region).await
-}
-
-pub fn image_arn(
-    image: &str,
-    region: &str,
-    account_id: Option<&str>,
-) -> Result<String, ClankerError> {
-    Ok(Arn::image(image, region, account_id)?.into_string())
 }

@@ -1,8 +1,8 @@
-use super::render;
-use crate::config::{AppConfig, ProjectConfig, PushConfig, RunConfig, StatusConfig};
+use crate::output::render;
 use crate::{ClankerError, OutputFormat};
 use clap::Args;
 use serde::Serialize;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,47 +22,99 @@ pub struct InitArgs {
     pub force: bool,
 }
 
-pub(super) fn execute(
-    args: &InitArgs,
-    config_path: &Path,
-    format: OutputFormat,
-) -> Result<(), ClankerError> {
-    init(args, config_path)?;
-    let result = InitResult {
-        config_path: config_path.to_owned(),
-    };
-    render(format, &result, || {
-        format!("Initialized {}", config_path.display())
-    })
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InitResult {
     config_path: PathBuf,
 }
 
-fn init(args: &InitArgs, path: &Path) -> Result<(), ClankerError> {
-    if path.exists() && !args.force {
-        return Err(ClankerError::AlreadyInitialized(path.to_owned()));
+pub(super) fn execute(
+    args: &InitArgs,
+    config_path: &Path,
+    format: OutputFormat,
+) -> Result<(), ClankerError> {
+    if config_path.exists() && !args.force {
+        return Err(ClankerError::AlreadyInitialized(config_path.to_owned()));
     }
-    let mut config = ProjectConfig {
-        schema_version: 1,
-        app: AppConfig {
-            name: args.name.clone(),
-            region: args.region.clone(),
-        },
-        push: PushConfig::default(),
-        status: StatusConfig::default(),
-        run: RunConfig::default(),
-    };
-    config.push.artifact_bucket = Some(args.artifact_bucket.clone().unwrap_or_default());
-    config.push.build_role_arn = Some(args.build_role_arn.clone().unwrap_or_default());
-    config.run.execution_role_arn = Some(args.execution_role_arn.clone().unwrap_or_default());
-    let text = toml::to_string_pretty(&config)
-        .map_err(|error| ClankerError::InvalidConfig(error.to_string()))?;
-    fs::write(path, text).map_err(|source| ClankerError::Io {
-        action: format!("write {}", path.display()),
+
+    fs::write(config_path, template(args)).map_err(|source| ClankerError::Io {
+        action: format!("write {}", config_path.display()),
         source,
+    })?;
+
+    let result = InitResult {
+        config_path: config_path.to_owned(),
+    };
+
+    render(format, &result, || {
+        format!("Initialized {}", config_path.display())
     })
+}
+
+fn template(args: &InitArgs) -> String {
+    let mut text = format!(
+        "schema-version = 1\n\n[app]\nname = {}\nregion = {}\n\n[push]\ncontext = \".\"\n",
+        toml_string(&args.name),
+        toml_string(&args.region)
+    );
+    entry(
+        &mut text,
+        "artifact-bucket",
+        args.artifact_bucket.as_deref(),
+        "my-artifact-bucket",
+    );
+    entry(
+        &mut text,
+        "build-role-arn",
+        args.build_role_arn.as_deref(),
+        "arn:aws:iam::123456789012:role/clankervm-build",
+    );
+    text.push_str("\n[run]\n");
+    entry(
+        &mut text,
+        "execution-role-arn",
+        args.execution_role_arn.as_deref(),
+        "arn:aws:iam::123456789012:role/clankervm-run",
+    );
+    text
+}
+
+fn entry(text: &mut String, key: &str, value: Option<&str>, example: &str) {
+    let (comment, value) = match value {
+        Some(value) => ("", toml_string(value)),
+        None => ("# ", toml_string(example)),
+    };
+    writeln!(text, "{comment}{key} = {value}").expect("writing to a String cannot fail");
+}
+
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.into()).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ProjectConfig;
+    use tempfile::TempDir;
+
+    #[test]
+    fn template_escapes_values_as_valid_toml() {
+        let args = InitArgs {
+            name: "quoted \"name\"\nwith control \u{7}".into(),
+            region: "region\\name".into(),
+            artifact_bucket: Some("bucket\nname".into()),
+            build_role_arn: None,
+            execution_role_arn: None,
+            force: false,
+        };
+
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("clankervm.toml");
+        fs::write(&path, template(&args)).unwrap();
+        let config = ProjectConfig::load(&path).unwrap();
+
+        assert_eq!(config.app.name, args.name);
+        assert_eq!(config.app.region, args.region);
+        assert_eq!(config.push.artifact_bucket, args.artifact_bucket);
+    }
 }

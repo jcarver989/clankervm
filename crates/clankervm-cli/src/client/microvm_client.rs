@@ -1,16 +1,41 @@
 use super::error::MicroVmClientError;
 use crate::{Arn, Tags};
+use async_stream::try_stream;
+use futures_util::Stream;
+use serde::{Deserialize, Deserializer};
+use std::str::FromStr;
+use std::time::Duration;
+use tokio::time::sleep;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageCapability {
     All,
 }
 
 impl ImageCapability {
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::All => "ALL",
         }
+    }
+}
+
+impl FromStr for ImageCapability {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ALL" => Ok(Self::All),
+            _ => Err(format!("unknown image capability `{value}`")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageCapability {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -152,6 +177,13 @@ pub struct InspectImageRequest {
     pub image_version: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageReleasePhase {
+    Pending,
+    Ready,
+    Failed,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedImageRelease {
     pub image_version: String,
@@ -159,6 +191,32 @@ pub struct ObservedImageRelease {
     pub version_state: ImageVersionState,
     pub version_status: ImageVersionStatus,
     pub state_reason: Option<String>,
+}
+
+impl ObservedImageRelease {
+    /// Unknown or unexpected states fail fast instead of polling forever.
+    pub fn phase(&self) -> ImageReleasePhase {
+        let image_pending = matches!(
+            self.image_state,
+            ImageState::Creating | ImageState::Created | ImageState::Updating | ImageState::Updated
+        );
+        let version_pending = matches!(
+            self.version_state,
+            ImageVersionState::Pending
+                | ImageVersionState::InProgress
+                | ImageVersionState::Successful
+        );
+        let ready = matches!(self.image_state, ImageState::Created | ImageState::Updated)
+            && self.version_state == ImageVersionState::Successful
+            && self.version_status == ImageVersionStatus::Active;
+        if ready {
+            ImageReleasePhase::Ready
+        } else if image_pending && version_pending {
+            ImageReleasePhase::Pending
+        } else {
+            ImageReleasePhase::Failed
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +255,35 @@ pub trait MicroVmClient: Send + Sync {
         &self,
         request: InspectImageRequest,
     ) -> Result<Option<ObservedImageRelease>, MicroVmClientError>;
+
+    fn poll_image_release(
+        &self,
+        request: InspectImageRequest,
+        initial: Option<ObservedImageRelease>,
+        interval: Duration,
+    ) -> impl Stream<Item = Result<Option<ObservedImageRelease>, MicroVmClientError>> + '_ {
+        try_stream! {
+            let mut initial = initial;
+            loop {
+                let observed = match initial.take() {
+                    Some(observed) => Some(observed),
+                    None => self.inspect_image(request.clone()).await?,
+                };
+
+                let terminal = observed
+                    .as_ref()
+                    .is_some_and(|observed| observed.phase() != ImageReleasePhase::Pending);
+
+                yield observed;
+
+                if terminal {
+                    return;
+                }
+
+                sleep(interval).await;
+            }
+        }
+    }
 
     async fn prune_image_versions(
         &self,

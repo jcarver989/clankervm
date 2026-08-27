@@ -127,8 +127,7 @@ impl AwsMicroVmClient {
         if let Some(memory) = configuration.minimum_memory_mib {
             builder = builder.resources(aws_resources(memory, "create image")?);
         }
-
-        for capability in &configuration.capabilities {
+        for capability in configuration.capabilities.iter().copied() {
             builder = builder.additional_os_capabilities(aws_capability(capability)?);
         }
 
@@ -159,8 +158,7 @@ impl AwsMicroVmClient {
         if let Some(memory) = configuration.minimum_memory_mib {
             builder = builder.resources(aws_resources(memory, "update image")?);
         }
-
-        for capability in &configuration.capabilities {
+        for capability in configuration.capabilities.iter().copied() {
             builder = builder.additional_os_capabilities(aws_capability(capability)?);
         }
 
@@ -353,7 +351,7 @@ fn aws_hooks(hooks: &ImageHooks) -> Hooks {
 }
 
 fn aws_capability(
-    capability: &ImageCapability,
+    capability: ImageCapability,
 ) -> Result<aws_sdk_lambdamicrovms::types::Capability, MicroVmClientError> {
     aws_sdk_lambdamicrovms::types::Capability::try_parse(capability.as_str())
         .map_err(|error| MicroVmClientError::service("configure image capability", error))

@@ -1,12 +1,6 @@
 use crate::ClankerError;
-use regex::Regex;
 use serde::Serialize;
 use std::fmt;
-use std::sync::LazyLock;
-
-static ARN_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\Aarn:[^:]+:[^:]+:[^:]*:[^:]*:[\s\S]+\z").expect("valid ARN pattern")
-});
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -14,17 +8,13 @@ pub struct Arn(String);
 
 impl Arn {
     pub fn parse(value: &str) -> Result<Self, ClankerError> {
-        if !ARN_PATTERN.is_match(value) {
+        if !is_valid(value) {
             return Err(ClankerError::InvalidArn(value.into()));
         }
         Ok(Self(value.into()))
     }
 
-    pub fn image(
-        image: &str,
-        region: &str,
-        account_id: Option<&str>,
-    ) -> Result<Self, ClankerError> {
+    pub fn image(image: &str, region: &str, account_id: &str) -> Result<Self, ClankerError> {
         if image.starts_with("arn:") {
             return Self::parse(image).map_err(|_| ClankerError::InvalidImage(image.into()));
         }
@@ -33,7 +23,6 @@ impl Arn {
             return Err(ClankerError::InvalidImage(image.into()));
         }
 
-        let account_id = account_id.ok_or_else(|| ClankerError::InvalidImage(image.into()))?;
         Ok(Self::lambda_resource(
             region,
             account_id,
@@ -86,6 +75,19 @@ impl Arn {
     }
 }
 
+/// `arn:partition:service:region:account:resource` — partition, service, and
+/// resource must be non-empty; region and account may be empty; the resource
+/// may contain further colons.
+fn is_valid(value: &str) -> bool {
+    let mut parts = value.splitn(6, ':');
+    parts.next() == Some("arn")
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next().is_some()
+        && parts.next().is_some()
+        && parts.next().is_some_and(|part| !part.is_empty())
+}
+
 impl AsRef<str> for Arn {
     fn as_ref(&self) -> &str {
         self.as_str()
@@ -128,9 +130,7 @@ mod tests {
     #[test]
     fn constructors_resolve_shorthand_resources() {
         assert_eq!(
-            Arn::image("demo", "us-east-1", Some("123"))
-                .unwrap()
-                .as_str(),
+            Arn::image("demo", "us-east-1", "123").unwrap().as_str(),
             "arn:aws:lambda:us-east-1:123:microvm-image:demo"
         );
         assert_eq!(

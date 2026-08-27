@@ -1,5 +1,4 @@
 use crate::util::sha256_hex;
-use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{self, Cursor};
 use std::os::unix::fs::PermissionsExt;
@@ -7,10 +6,8 @@ use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub struct ZipBundle {
-    #[serde(skip)]
     pub bytes: Vec<u8>,
     pub digest: String,
 }
@@ -21,45 +18,45 @@ impl ZipBundle {
         let digest = sha256_hex(&bytes);
         Ok(Self { bytes, digest })
     }
-}
 
-pub(crate) fn create_zip_bundle(context: &Path) -> io::Result<ZipBundle> {
-    let mut paths = Vec::new();
-    collect(context, &mut paths)?;
-    paths.sort();
-    let mut output = Cursor::new(Vec::new());
-    {
-        let mut zip = ZipWriter::new(&mut output);
-        for path in paths {
-            let metadata = fs::symlink_metadata(&path)?;
-            let relative = path.strip_prefix(context).expect("collected from context");
-            let mut name = relative.to_string_lossy().replace(MAIN_SEPARATOR, "/");
-            let mut options = SimpleFileOptions::default();
-            options = options.unix_permissions(metadata.permissions().mode());
+    pub(crate) fn create(context: &Path) -> io::Result<Self> {
+        let mut paths = Vec::new();
+        collect(context, &mut paths)?;
+        paths.sort();
+        let mut output = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut output);
+            for path in paths {
+                let metadata = fs::symlink_metadata(&path)?;
+                let relative = path.strip_prefix(context).expect("collected from context");
+                let mut name = relative.to_string_lossy().replace(MAIN_SEPARATOR, "/");
+                let options =
+                    SimpleFileOptions::default().unix_permissions(metadata.permissions().mode());
 
-            if metadata.is_symlink() {
-                let target = fs::read_link(&path)?;
-                zip.add_symlink(name, target.to_string_lossy(), options)
-                    .map_err(zip_error)?;
-            } else if metadata.is_dir() {
-                name.push('/');
-                zip.add_directory(name, options).map_err(zip_error)?;
-            } else if metadata.is_file() {
-                zip.start_file(name, options).map_err(zip_error)?;
-                let mut file = File::open(path)?;
-                io::copy(&mut file, &mut zip)?;
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("unsupported bundle context entry: {}", path.display()),
-                ));
+                if metadata.is_symlink() {
+                    let target = fs::read_link(&path)?;
+                    zip.add_symlink(name, target.to_string_lossy(), options)
+                        .map_err(zip_error)?;
+                } else if metadata.is_dir() {
+                    name.push('/');
+                    zip.add_directory(name, options).map_err(zip_error)?;
+                } else if metadata.is_file() {
+                    zip.start_file(name, options).map_err(zip_error)?;
+                    let mut file = File::open(path)?;
+                    io::copy(&mut file, &mut zip)?;
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("unsupported bundle context entry: {}", path.display()),
+                    ));
+                }
             }
+            zip.finish().map_err(zip_error)?;
         }
-        zip.finish().map_err(zip_error)?;
+        let bytes = output.into_inner();
+        let digest = sha256_hex(&bytes);
+        Ok(Self { bytes, digest })
     }
-    let bytes = output.into_inner();
-    let digest = sha256_hex(&bytes);
-    Ok(ZipBundle { bytes, digest })
 }
 
 fn collect(directory: &Path, output: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -91,8 +88,8 @@ mod tests {
         fs::create_dir(directory.path().join("empty")).unwrap();
         fs::write(directory.path().join("nested/file"), "content").unwrap();
 
-        let first = create_zip_bundle(directory.path()).unwrap();
-        let second = create_zip_bundle(directory.path()).unwrap();
+        let first = ZipBundle::create(directory.path()).unwrap();
+        let second = ZipBundle::create(directory.path()).unwrap();
 
         assert_eq!(first.digest, second.digest);
         assert_eq!(first.bytes, second.bytes);

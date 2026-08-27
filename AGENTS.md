@@ -8,6 +8,7 @@ This is the repository for ClankerVM, a CLI and a server that make it easy to de
 
 1. Prefer using `Foo` over `std::biz::baz::boo::Foo` in code by importing types at the top of the file, e.g. `use std::biz::baz::boo::Foo`.
 2. Prefer using `T`, `U`, `V` etc for generic type param names, always start with `T`.
+3. Do not create custom macros.
 
 ### Testing
 

@@ -22,6 +22,7 @@ must_use_candidate = "allow"
 return_self_not_must_use = "allow"
 
 [workspace.dependencies]
+async-stream = "0.3"
 aws-config = { version = "1.8.18", features = ["behavior-version-latest"] }
 aws-sdk-lambdamicrovms = "1.6.0"
 aws-sdk-s3 = "1.144.0"
@@ -29,9 +30,9 @@ aws-smithy-types = ">=1.4.9, <1.7.0"
 axum = "0.8.9"
 base16ct = { version = "1.0", features = ["alloc"] }
 clap = { version = "4.6", features = ["derive", "env"] }
+futures-util = "0.3"
 nix = { version = "0.31", default-features = false }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
-regex = "1.13.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11"

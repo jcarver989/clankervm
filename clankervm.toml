@@ -1,23 +1,13 @@
 schema-version = 1
 
 [app]
-name = "foo"
+name = "test"
 region = "us-west-2"
 
 [push]
 context = "."
-artifact-bucket = ""
-build-role-arn = ""
-capabilities = []
-tags = []
-port = 9000
-ready-timeout-seconds = 300
-run-timeout-seconds = 60
-terminate-timeout-seconds = 30
-timeout = "1h"
-
-[status]
-timeout = "1h"
+# artifact-bucket = "my-artifact-bucket"
+# build-role-arn = "arn:aws:iam::123456789012:role/clankervm-build"
 
 [run]
-execution-role-arn = ""
+# execution-role-arn = "arn:aws:iam::123456789012:role/clankervm-run"

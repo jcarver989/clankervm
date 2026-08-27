@@ -72,11 +72,17 @@ fn push_flags_mirror_flat_config_values() {
         panic!("expected push command");
     };
 
-    assert_eq!(push.context.as_deref(), Some(std::path::Path::new("image")));
-    assert_eq!(push.artifact_bucket.as_deref(), Some("artifacts"));
-    assert_eq!(push.capabilities.unwrap(), ["ALL"]);
-    assert_eq!(push.tags.unwrap(), ["team=platform", "environment=test"]);
-    assert_eq!(push.ready_timeout_seconds, Some(120));
+    assert_eq!(
+        push.config.context.as_deref(),
+        Some(std::path::Path::new("image"))
+    );
+    assert_eq!(push.config.artifact_bucket.as_deref(), Some("artifacts"));
+    assert_eq!(push.config.capabilities.unwrap()[0].as_str(), "ALL");
+    assert_eq!(
+        push.config.tags.unwrap(),
+        ["team=platform", "environment=test"]
+    );
+    assert_eq!(push.config.ready_timeout_seconds, Some(120));
 }
 
 #[test]
@@ -94,6 +100,8 @@ fn status_owns_waiting_and_removed_options_are_rejected() {
         vec!["clankervm", "wait"],
         vec!["clankervm", "push", "--detach"],
         vec!["clankervm", "push", "--poll-interval", "1s"],
+        vec!["clankervm", "push", "--capability", "NOPE"],
+        vec!["clankervm", "push", "--timeout", "eventually"],
         vec!["clankervm", "run", "--env", "X=1", "--", "echo"],
         vec!["clankervm", "run", "--script", "run.sh", "--", "echo"],
     ] {
@@ -119,12 +127,12 @@ fn init_only_creates_the_project_file() {
     assert!(config.is_file());
     let text = fs::read_to_string(&config).unwrap();
     assert!(text.starts_with("schema-version = 1"), "{text}");
+    assert!(text.contains("name = \"demo\""), "{text}");
     assert!(text.contains("[push]"), "{text}");
-    assert!(text.contains("artifact-bucket = \"\""), "{text}");
-    assert!(text.contains("build-role-arn = \"\""), "{text}");
-    assert!(text.contains("tags = []"), "{text}");
-    assert!(text.contains("[status]"), "{text}");
-    assert!(text.contains("execution-role-arn = \"\""), "{text}");
+    assert!(text.contains("# artifact-bucket = "), "{text}");
+    assert!(text.contains("# build-role-arn = "), "{text}");
+    assert!(text.contains("[run]"), "{text}");
+    assert!(text.contains("# execution-role-arn = "), "{text}");
     assert!(!text.contains("[bundle]"), "{text}");
     assert!(!text.contains("[image]"), "{text}");
     assert!(!directory.path().join(".gitignore").exists());
@@ -207,7 +215,7 @@ execution-role-arn = "arn:aws:iam::123456789012:role/run"
 #[test]
 fn raw_run_payload_preserves_command_and_args() {
     let payload = build_run_payload("echo", &["hello world".into()], "us-east-1").unwrap();
-    let json: Value = serde_json::from_slice(&payload).unwrap();
+    let json: Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(json["command"], "echo");
     assert_eq!(json["args"], serde_json::json!(["hello world"]));
 }

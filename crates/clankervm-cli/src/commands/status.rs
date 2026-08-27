@@ -1,23 +1,46 @@
-use super::{ReleaseStatus, image_account, render};
-use crate::client::{
-    ImageState, ImageVersionState, ImageVersionStatus, InspectImageRequest, MicroVmClient,
-    ObservedImageRelease,
+use crate::client::{InspectImageRequest, MicroVmClient, ObservedImageRelease};
+use crate::config::ProjectConfig;
+use crate::output::{ReleaseProgress, render};
+use crate::release::{
+    Release, ReleaseStatus, configured_account_role, release_target, resolve_image,
+    wait_for_release,
 };
-use crate::util::parse_release;
-use crate::{Arn, ClankerError, OutputFormat, Project};
+use crate::util::{deserialize_optional_duration, parse_duration};
+use crate::{ClankerError, OutputFormat, Project};
 use clap::Args;
-use std::time::{Duration, Instant};
+use serde::Deserialize;
+use std::time::Duration;
 
-pub(super) const POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct StatusArgs {
     pub release: Option<String>,
+    #[arg(long)]
+    pub image: Option<String>,
     /// Wait until the release becomes active.
     #[arg(long)]
     pub wait: bool,
-    #[arg(long)]
-    pub timeout: Option<String>,
+    #[command(flatten)]
+    pub config: StatusConfig,
+}
+
+#[derive(Clone, Debug, Default, Args, Deserialize)]
+#[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
+pub struct StatusConfig {
+    #[arg(long, value_parser = parse_duration)]
+    #[serde(default, deserialize_with = "deserialize_optional_duration")]
+    pub timeout: Option<Duration>,
+}
+
+impl StatusConfig {
+    pub fn overlay(self, lower: &Self) -> Self {
+        Self {
+            timeout: self.timeout.or(lower.timeout),
+        }
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout.unwrap_or_else(|| Duration::from_hours(1))
+    }
 }
 
 pub(super) async fn execute<T: MicroVmClient>(
@@ -26,18 +49,11 @@ pub(super) async fn execute<T: MicroVmClient>(
     format: OutputFormat,
     client: &T,
 ) -> Result<(), ClankerError> {
-    let (release, observed) = resolve_release(args.release.as_deref(), project, client).await?;
-    let result = if args.wait {
-        let timeout = duration_or(args.timeout.as_deref(), project.config().status.timeout)?;
-        wait_for_release(client, release, observed, timeout).await?
-    } else if let Some(observed) = observed {
-        apply_observation(release, observed)
-    } else {
-        match read_observation(client, &release).await? {
-            Some(observed) => apply_observation(release, observed),
-            None => release,
-        }
-    };
+    let mut progress = ReleaseProgress::new(format);
+    let result = status(args, &project.config, client, |status| {
+        progress.report(status);
+    })
+    .await?;
     render(format, &result, || {
         format!(
             "App:        {}\nRelease:    {}\nImage:      {}\nBuild:      {}\nActivation: {}\nLogs:       {}",
@@ -51,157 +67,118 @@ pub(super) async fn execute<T: MicroVmClient>(
     })
 }
 
+async fn status<T, F>(
+    args: StatusArgs,
+    config: &ProjectConfig,
+    client: &T,
+    report: F,
+) -> Result<ReleaseStatus, ClankerError>
+where
+    T: MicroVmClient,
+    F: FnMut(&ReleaseStatus),
+{
+    let (release, observed) = resolve_release(
+        args.release.as_deref(),
+        args.image.as_deref(),
+        config,
+        client,
+    )
+    .await?;
+    if args.wait {
+        let timeout = args.config.overlay(&config.status).timeout();
+        return wait_for_release(client, release, observed, timeout, report).await;
+    }
+    let observed = match observed {
+        Some(observed) => Some(observed),
+        None => client.inspect_image(release.inspect_request()).await?,
+    };
+    Ok(release.status(observed.as_ref()))
+}
+
 async fn resolve_release<T: MicroVmClient>(
     requested: Option<&str>,
-    project: &Project,
+    image: Option<&str>,
+    config: &ProjectConfig,
     client: &T,
-) -> Result<(ReleaseStatus, Option<ObservedImageRelease>), ClankerError> {
-    let config = project.config();
-    if let Some(value) = requested {
-        let (name, version) = parse_release(value)?;
-        let arn = Arn::image(name, &config.app.region, Some(image_account(config, None)?))?;
-        return Ok((pending_release(name, arn, version, None, None), None));
+) -> Result<(Release, Option<ObservedImageRelease>), ClankerError> {
+    let image = resolve_image(config, image, requested)?;
+    let account_role = configured_account_role(&image)?;
+    let target = release_target(&image, account_role)?;
+    if let Some(version) = target.version {
+        return Ok((
+            Release::new(&target.name, target.image_arn, &version, None, None),
+            None,
+        ));
     }
-    let arn = Arn::image(
-        &config.app.name,
-        &config.app.region,
-        Some(image_account(config, None)?),
-    )?;
     let observed = client
         .inspect_image(InspectImageRequest {
-            image_identifier: arn.clone(),
+            image_identifier: target.image_arn.clone(),
             image_version: None,
         })
         .await?
-        .ok_or_else(|| ClankerError::InvalidImage(arn.to_string()))?;
-    let release = pending_release(&config.app.name, arn, &observed.image_version, None, None);
+        .ok_or_else(|| ClankerError::InvalidImage(target.image_arn.to_string()))?;
+    let release = Release::new(
+        &target.name,
+        target.image_arn,
+        &observed.image_version,
+        None,
+        None,
+    );
     Ok((release, Some(observed)))
 }
 
-pub(super) async fn wait_for_release<T: MicroVmClient>(
-    client: &T,
-    mut release: ReleaseStatus,
-    mut observed: Option<ObservedImageRelease>,
-    timeout: Duration,
-) -> Result<ReleaseStatus, ClankerError> {
-    let start = Instant::now();
-    let mut prior = None;
-    loop {
-        let current = match observed.take() {
-            Some(observed) => Some(observed),
-            None => read_observation(client, &release).await?,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::{FakeMicroVmClient, MicroVmCall};
+    use crate::commands::RunConfig;
+    use crate::test_support::{ObservedImageReleaseBuilder, ProjectConfigBuilder};
+
+    fn config() -> ProjectConfig {
+        ProjectConfigBuilder::new()
+            .run(RunConfig {
+                execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
+                ..RunConfig::default()
+            })
+            .build()
+    }
+
+    #[tokio::test]
+    async fn explicit_release_inspects_the_exact_version() {
+        let client = FakeMicroVmClient::builder()
+            .inspection_responses([Ok(Some(ObservedImageReleaseBuilder::active("3")))])
+            .build();
+        let args = StatusArgs {
+            release: Some("demo@3".into()),
+            ..StatusArgs::default()
         };
-        if let Some(current) = current {
-            let state = format!(
-                "{}:{}:{}",
-                current.image_state.as_str(),
-                current.version_state.as_str(),
-                current.version_status.as_str()
-            );
-            if prior.as_deref() != Some(state.as_str()) {
-                eprintln!(
-                    "  Image: {:<10} Build: {:<10} Activation: {}",
-                    current.image_state.as_str(),
-                    current.version_state.as_str(),
-                    current.version_status.as_str()
-                );
-                prior = Some(state);
-            }
-            if is_ready(&current) {
-                return Ok(apply_observation(release, current));
-            }
-            if is_failed(&current) {
-                return Err(ClankerError::ReleaseFailed {
-                    release: release.release,
-                    reason: current
-                        .state_reason
-                        .unwrap_or_else(|| "AWS did not provide a failure reason".into()),
-                    log_group: release.build_log_group,
-                });
-            }
-            release = apply_observation(release, current);
-        }
-        if start.elapsed() >= timeout {
-            return Err(ClankerError::WaitTimeout {
-                release: release.release,
-                timeout,
-            });
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
+
+        let result = status(args, &config(), &client, |_| {}).await.unwrap();
+
+        assert_eq!(result.release, "demo@3");
+        assert_eq!(result.version_status, "ACTIVE");
+        let calls = client.calls();
+        let [MicroVmCall::InspectImage(request)] = calls.as_slice() else {
+            panic!("expected one inspection, got {calls:?}");
+        };
+        assert_eq!(request.image_version.as_deref(), Some("3"));
     }
-}
 
-async fn read_observation<T: MicroVmClient>(
-    client: &T,
-    release: &ReleaseStatus,
-) -> Result<Option<ObservedImageRelease>, ClankerError> {
-    client
-        .inspect_image(InspectImageRequest {
-            image_identifier: release.image_arn.clone(),
-            image_version: Some(release.image_version.clone()),
-        })
-        .await
-        .map_err(Into::into)
-}
+    #[tokio::test]
+    async fn latest_release_is_resolved_from_the_image() {
+        let client = FakeMicroVmClient::builder()
+            .inspection_responses([Ok(Some(ObservedImageReleaseBuilder::active("2")))])
+            .build();
 
-fn apply_observation(mut release: ReleaseStatus, observed: ObservedImageRelease) -> ReleaseStatus {
-    release.image_state = observed.image_state.as_str().into();
-    release.version_state = observed.version_state.as_str().into();
-    release.version_status = observed.version_status.as_str().into();
-    release.state_reason = observed.state_reason;
-    release
-}
+        let result = status(StatusArgs::default(), &config(), &client, |_| {})
+            .await
+            .unwrap();
 
-pub(super) fn pending_release(
-    app: &str,
-    image_arn: Arn,
-    image_version: &str,
-    bundle_digest: Option<String>,
-    artifact_uri: Option<String>,
-) -> ReleaseStatus {
-    ReleaseStatus {
-        app: app.into(),
-        release: format!("{app}@{image_version}"),
-        image_arn,
-        image_version: image_version.into(),
-        image_state: "PENDING".into(),
-        version_state: "PENDING".into(),
-        version_status: "INACTIVE".into(),
-        state_reason: None,
-        bundle_digest,
-        artifact_uri,
-        build_log_group: format!("/aws/lambda-microvms/{app}"),
+        assert_eq!(result.release, "demo@2");
+        assert_eq!(
+            result.image_arn.as_str(),
+            "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
+        );
+        assert_eq!(client.calls().len(), 1);
     }
-}
-
-fn is_ready(release: &ObservedImageRelease) -> bool {
-    matches!(
-        release.image_state,
-        ImageState::Created | ImageState::Updated
-    ) && release.version_state == ImageVersionState::Successful
-        && release.version_status == ImageVersionStatus::Active
-}
-
-fn is_failed(release: &ObservedImageRelease) -> bool {
-    let image_in_progress = matches!(
-        release.image_state,
-        ImageState::Creating | ImageState::Created | ImageState::Updating | ImageState::Updated
-    );
-    let version_in_progress = matches!(
-        release.version_state,
-        ImageVersionState::Pending | ImageVersionState::InProgress | ImageVersionState::Successful
-    );
-    !(image_in_progress && version_in_progress)
-}
-
-pub(super) fn duration_or(
-    argument: Option<&str>,
-    default: Duration,
-) -> Result<Duration, ClankerError> {
-    let Some(value) = argument else {
-        return Ok(default);
-    };
-    humantime::parse_duration(value).map_err(|error| {
-        ClankerError::InvalidConfig(format!("invalid duration `{value}`: {error}"))
-    })
 }

@@ -1,11 +1,34 @@
-use super::render;
-use crate::{ClankerError, MicroVmClient, OutputFormat, Project};
+use crate::client::{MicroVmClient, RunMicroVmRequest};
+use crate::config::ProjectConfig;
+use crate::output::render;
+use crate::payload::build_run_payload;
+use crate::release::{release_target, resolve_image};
+use crate::util::{non_empty_string, required_string};
+use crate::{Arn, ClankerError, OutputFormat, Project};
 use clap::Args;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Args)]
+const DEFAULT_INGRESS: &str = "NO_INGRESS";
+const DEFAULT_EGRESS: &str = "INTERNET_EGRESS";
+const DEFAULT_MAX_DURATION: i32 = 3600;
+
+#[derive(Debug, Default, Args)]
 pub struct RunArgs {
     #[arg(long)]
+    pub image: Option<String>,
+    #[arg(long)]
     pub release: Option<String>,
+    #[arg(long)]
+    pub client_token: Option<String>,
+    #[command(flatten)]
+    pub config: RunConfig,
+    #[arg(last = true, required = true, allow_hyphen_values = true)]
+    pub command: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Args, Deserialize)]
+#[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
+pub struct RunConfig {
     #[arg(long)]
     pub execution_role_arn: Option<String>,
     #[arg(long)]
@@ -16,10 +39,40 @@ pub struct RunArgs {
     pub max_duration: Option<i32>,
     #[arg(long)]
     pub log_group: Option<String>,
-    #[arg(long)]
-    pub client_token: Option<String>,
-    #[arg(last = true, required = true, allow_hyphen_values = true)]
-    pub command: Vec<String>,
+}
+
+impl RunConfig {
+    pub fn overlay(self, lower: &Self) -> Self {
+        Self {
+            execution_role_arn: self
+                .execution_role_arn
+                .or_else(|| lower.execution_role_arn.clone()),
+            ingress: self.ingress.or_else(|| lower.ingress.clone()),
+            egress: self.egress.or_else(|| lower.egress.clone()),
+            max_duration: self.max_duration.or(lower.max_duration),
+            log_group: self.log_group.or_else(|| lower.log_group.clone()),
+        }
+    }
+
+    fn resolve(self) -> Result<ResolvedRunConfig, ClankerError> {
+        Ok(ResolvedRunConfig {
+            execution_role_arn: required_string(self.execution_role_arn, "run.execution-role-arn")?,
+            ingress: non_empty_string(self.ingress, "run.ingress")?
+                .unwrap_or_else(|| DEFAULT_INGRESS.into()),
+            egress: non_empty_string(self.egress, "run.egress")?
+                .unwrap_or_else(|| DEFAULT_EGRESS.into()),
+            max_duration: self.max_duration.unwrap_or(DEFAULT_MAX_DURATION),
+            log_group: non_empty_string(self.log_group, "run.log-group")?,
+        })
+    }
+}
+
+struct ResolvedRunConfig {
+    execution_role_arn: String,
+    ingress: String,
+    egress: String,
+    max_duration: i32,
+    log_group: Option<String>,
 }
 
 pub(super) async fn execute<T: MicroVmClient>(
@@ -28,12 +81,12 @@ pub(super) async fn execute<T: MicroVmClient>(
     format: OutputFormat,
     client: &T,
 ) -> Result<(), ClankerError> {
-    let result = crate::runtime::run(args, project.config(), client).await?;
+    let result = run(args, &project.config, client).await?;
     render(format, &result, || {
         format!(
             "✓ Started MicroVM {}\n  Release: {}@{}{}",
             result.microvm_id,
-            project.config().app.name,
+            result.image_name,
             result.image_version,
             result
                 .log_group
@@ -41,4 +94,193 @@ pub(super) async fn execute<T: MicroVmClient>(
                 .map_or_else(String::new, |group| format!("\n  Logs:    {group}"))
         )
     })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunResult {
+    pub microvm_id: String,
+    pub image_version: String,
+    pub log_group: Option<String>,
+    #[serde(skip)]
+    image_name: String,
+}
+
+pub async fn run<T: MicroVmClient>(
+    args: RunArgs,
+    config: &ProjectConfig,
+    client: &T,
+) -> Result<RunResult, ClankerError> {
+    let image = resolve_image(config, args.image.as_deref(), args.release.as_deref())?;
+    let region = &image.region;
+    let run = args.config.overlay(&image.run).resolve()?;
+    let (command, command_args) = args
+        .command
+        .split_first()
+        .expect("clap requires a command after --");
+    let payload = build_run_payload(command, command_args, region)?;
+    let account_role = image
+        .push
+        .build_role_arn
+        .as_deref()
+        .unwrap_or(&run.execution_role_arn);
+    let target = release_target(&image, account_role)?;
+    let execution_role = Arn::parse(&run.execution_role_arn)?;
+    let log_group = run.log_group.clone();
+    let request = RunMicroVmRequest {
+        image_identifier: target.image_arn,
+        image_version: target.version,
+        execution_role_arn: execution_role,
+        ingress_network_connector: Arn::network_connector(region, &run.ingress)?,
+        egress_network_connector: Arn::network_connector(region, &run.egress)?,
+        run_hook_payload: payload,
+        maximum_duration_seconds: run.max_duration,
+        client_token: args.client_token,
+        cloudwatch_log_group: log_group.clone(),
+    };
+    let output = client.run_microvm(request).await?;
+    Ok(RunResult {
+        microvm_id: output.microvm_id,
+        image_version: output.image_version,
+        log_group,
+        image_name: target.name,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::{FakeMicroVmClient, MicroVmCall, RunMicroVmResponse};
+    use crate::test_support::ProjectConfigBuilder;
+
+    fn config(run: RunConfig) -> ProjectConfig {
+        ProjectConfigBuilder::new().run(run).build()
+    }
+
+    #[tokio::test]
+    async fn run_applies_project_defaults() {
+        let config = config(RunConfig {
+            execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
+            log_group: Some("/demo/runs".into()),
+            ..RunConfig::default()
+        });
+        let client = FakeMicroVmClient::builder()
+            .run_responses([Ok(RunMicroVmResponse {
+                microvm_id: "microvm-7".into(),
+                image_version: "3".into(),
+            })])
+            .build();
+        let args = RunArgs {
+            command: vec!["echo".into(), "hello world".into()],
+            ..RunArgs::default()
+        };
+
+        let result = run(args, &config, &client).await.unwrap();
+
+        assert_eq!(result.microvm_id, "microvm-7");
+        assert_eq!(result.image_version, "3");
+        assert_eq!(result.log_group.as_deref(), Some("/demo/runs"));
+        let calls = client.calls();
+        let MicroVmCall::RunMicroVm(request) = &calls[0] else {
+            panic!("expected run call, got {calls:?}");
+        };
+        assert_eq!(
+            request.image_identifier.as_str(),
+            "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
+        );
+        assert_eq!(request.image_version, None);
+        assert!(
+            request
+                .ingress_network_connector
+                .as_str()
+                .ends_with("NO_INGRESS")
+        );
+        assert!(
+            request
+                .egress_network_connector
+                .as_str()
+                .ends_with("INTERNET_EGRESS")
+        );
+        assert_eq!(request.maximum_duration_seconds, 3600);
+        assert_eq!(request.cloudwatch_log_group.as_deref(), Some("/demo/runs"));
+        let payload: serde_json::Value = serde_json::from_str(&request.run_hook_payload).unwrap();
+        assert_eq!(payload["command"], "echo");
+        assert_eq!(payload["args"], serde_json::json!(["hello world"]));
+        assert_eq!(payload["environment"]["AWS_REGION"], "us-east-1");
+    }
+
+    #[tokio::test]
+    async fn flags_override_defaults_and_pin_the_release() {
+        let config = config(RunConfig {
+            execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
+            ..RunConfig::default()
+        });
+        let client = FakeMicroVmClient::default();
+        let args = RunArgs {
+            release: Some("other@7".into()),
+            client_token: Some("run-42".into()),
+            config: RunConfig {
+                ingress: Some("PUBLIC_INGRESS".into()),
+                max_duration: Some(60),
+                ..RunConfig::default()
+            },
+            command: vec!["echo".into()],
+            ..RunArgs::default()
+        };
+
+        run(args, &config, &client).await.unwrap();
+
+        let calls = client.calls();
+        let MicroVmCall::RunMicroVm(request) = &calls[0] else {
+            panic!("expected run call, got {calls:?}");
+        };
+        assert_eq!(
+            request.image_identifier.as_str(),
+            "arn:aws:lambda:us-east-1:123456789012:microvm-image:other"
+        );
+        assert_eq!(request.image_version.as_deref(), Some("7"));
+        assert!(
+            request
+                .ingress_network_connector
+                .as_str()
+                .ends_with("PUBLIC_INGRESS")
+        );
+        assert_eq!(request.maximum_duration_seconds, 60);
+        assert_eq!(request.client_token.as_deref(), Some("run-42"));
+    }
+
+    #[test]
+    fn empty_run_values_are_rejected() {
+        for config in [
+            RunConfig {
+                execution_role_arn: Some(String::new()),
+                ..RunConfig::default()
+            },
+            RunConfig {
+                execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
+                ingress: Some(" ".into()),
+                ..RunConfig::default()
+            },
+        ] {
+            assert!(matches!(
+                config.resolve(),
+                Err(ClankerError::InvalidConfig(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_execution_role_is_rejected() {
+        let config = config(RunConfig::default());
+        let client = FakeMicroVmClient::default();
+        let args = RunArgs {
+            command: vec!["echo".into()],
+            ..RunArgs::default()
+        };
+
+        let error = run(args, &config, &client).await.unwrap_err();
+
+        assert!(matches!(error, ClankerError::InvalidConfig(_)), "{error}");
+        assert!(client.calls().is_empty());
+    }
 }
