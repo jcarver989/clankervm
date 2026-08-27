@@ -48,84 +48,11 @@ pub struct PushConfig {
     pub timeout: Duration,
 }
 
-impl Default for PushConfig {
-    fn default() -> Self {
-        Self {
-            context: PathBuf::from("."),
-            artifact_bucket: None,
-            build_role_arn: None,
-            base_image: None,
-            minimum_memory_mib: None,
-            capabilities: Vec::new(),
-            egress: None,
-            keep_versions: None,
-            tags: Vec::new(),
-            port: 9000,
-            ready_timeout_seconds: 300,
-            run_timeout_seconds: 60,
-            terminate_timeout_seconds: 30,
-            timeout: Duration::from_hours(1),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 pub struct StatusConfig {
     #[serde(with = "human_duration")]
     pub timeout: Duration,
-}
-
-impl Default for StatusConfig {
-    fn default() -> Self {
-        Self {
-            timeout: Duration::from_hours(1),
-        }
-    }
-}
-
-mod capabilities {
-    use crate::client::ImageCapability;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(
-        values: &[ImageCapability],
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        values
-            .iter()
-            .map(ImageCapability::as_str)
-            .collect::<Vec<_>>()
-            .serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Vec<ImageCapability>, D::Error> {
-        Vec::<String>::deserialize(deserializer)?
-            .into_iter()
-            .map(|value| match value.as_str() {
-                "ALL" => Ok(ImageCapability::All),
-                _ => Err(serde::de::Error::custom(format!(
-                    "unknown image capability `{value}`"
-                ))),
-            })
-            .collect()
-    }
-}
-
-mod human_duration {
-    use serde::{Deserialize, Deserializer, Serializer};
-    use std::time::Duration;
-
-    pub fn serialize<S: Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(&humantime::format_duration(*value))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
-        humantime::parse_duration(&String::deserialize(deserializer)?)
-            .map_err(serde::de::Error::custom)
-    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -187,6 +114,79 @@ pub fn parse_tags(values: &[String]) -> Result<BTreeMap<String, String>, Clanker
         }
     }
     Ok(tags)
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self {
+            context: PathBuf::from("."),
+            artifact_bucket: None,
+            build_role_arn: None,
+            base_image: None,
+            minimum_memory_mib: None,
+            capabilities: Vec::new(),
+            egress: None,
+            keep_versions: None,
+            tags: Vec::new(),
+            port: 9000,
+            ready_timeout_seconds: 300,
+            run_timeout_seconds: 60,
+            terminate_timeout_seconds: 30,
+            timeout: Duration::from_hours(1),
+        }
+    }
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_hours(1),
+        }
+    }
+}
+
+mod capabilities {
+    use crate::client::ImageCapability;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        values: &[ImageCapability],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        values
+            .iter()
+            .map(ImageCapability::as_str)
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<ImageCapability>, D::Error> {
+        Vec::<String>::deserialize(deserializer)?
+            .into_iter()
+            .map(|value| match value.as_str() {
+                "ALL" => Ok(ImageCapability::All),
+                _ => Err(serde::de::Error::custom(format!(
+                    "unknown image capability `{value}`"
+                ))),
+            })
+            .collect()
+    }
+}
+
+mod human_duration {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&humantime::format_duration(*value))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+        humantime::parse_duration(&String::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]
