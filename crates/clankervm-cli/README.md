@@ -13,7 +13,7 @@ clankervm push
 clankervm run -- echo 'hello from a MicroVM'
 ```
 
-AWS credentials use the standard AWS SDK credential chain and are never stored in the project file. If any required deployment values are omitted from `init`, it writes their keys with empty-string placeholders so the generated file remains an explicit checklist.
+AWS credentials use the standard AWS SDK credential chain and are never stored in the project file. Set `image.profile` to select a named AWS profile without storing its credentials. If any required deployment values are omitted from `init`, it writes their keys with empty-string placeholders so the generated file remains an explicit checklist.
 
 ## Configuration (schema version 1)
 
@@ -25,6 +25,7 @@ schema-version = 1
 [image]
 name = "my-runner"
 region = "us-west-2"
+profile = "Production-PowerUser"
 
 [push]
 context = "image"

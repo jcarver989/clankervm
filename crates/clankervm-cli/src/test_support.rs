@@ -38,6 +38,7 @@ impl ProjectConfigBuilder {
             image: ImageConfig {
                 name: self.name,
                 region: self.region,
+                profile: None,
             },
             push: self.push,
             status: self.status,

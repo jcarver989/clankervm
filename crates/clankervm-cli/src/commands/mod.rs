@@ -37,10 +37,14 @@ pub(crate) async fn execute(
     }
 
     let project = Project::load(&config_path, region)?;
-    let sdk = aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new(project.config.image.region.clone()))
-        .load()
-        .await;
+    let mut sdk_loader = aws_config::defaults(BehaviorVersion::latest())
+        .region(Region::new(project.config.image.region.clone()));
+
+    if let Some(profile) = &project.config.image.profile {
+        sdk_loader = sdk_loader.profile_name(profile);
+    }
+
+    let sdk = sdk_loader.load().await;
 
     let client = AwsMicroVmClient::new(&sdk);
     match command {

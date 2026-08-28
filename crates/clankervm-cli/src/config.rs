@@ -24,6 +24,7 @@ pub struct ProjectConfig {
 pub struct ImageConfig {
     pub name: String,
     pub region: String,
+    pub profile: Option<String>,
 }
 
 impl ProjectConfig {
@@ -44,6 +45,7 @@ impl ProjectConfig {
         }
         validate_non_empty(Some(&config.image.name), "image.name")?;
         validate_non_empty(Some(&config.image.region), "image.region")?;
+        validate_non_empty(config.image.profile.as_deref(), "image.profile")?;
         validate_push(&config.push)?;
         validate_run(&config.run)?;
         Ok(config)
@@ -195,6 +197,7 @@ mod tests {
 [image]
 name = "demo"
 region = "us-east-1"
+profile = "Production-PowerUser"
 [push]
 capabilities = ["ALL"]
 tags = ["team=platform"]
@@ -203,6 +206,10 @@ tags = ["team=platform"]
     #[test]
     fn capabilities_and_tags_use_flat_push_schema() {
         let config: ProjectConfig = toml::from_str(CONFIG).unwrap();
+        assert_eq!(
+            config.image.profile.as_deref(),
+            Some("Production-PowerUser")
+        );
         assert_eq!(
             config.push.capabilities.as_deref(),
             Some(&[ImageCapability::All][..])
@@ -234,7 +241,7 @@ tags = ["team=platform"]
     }
 
     #[test]
-    fn old_app_and_profile_schemas_are_rejected() {
+    fn old_app_and_nested_image_schemas_are_rejected() {
         for text in [
             "schema-version = 1\n[app]\nname = 'x'\nregion = 'r'",
             "schema-version = 1\n[image]\nname = 'x'\nregion = 'r'\n[image.agent]\ncontext = '.'",
