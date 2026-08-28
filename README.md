@@ -41,7 +41,7 @@ clankervm push
 clankervm run -- /usr/local/bin/my-job --job-id 42
 ```
 
-`push` bundles the directory configured by `[push].context` in memory, uploads it, creates or updates the named image, and waits for the exact returned image version to become active. It stores no local deployment state. An existing ZIP can be supplied with the invocation-only `push --bundle PATH` option. See the [CLI configuration reference](crates/clankervm-cli/README.md) for schema version 1 and push/run/status defaults.
+Each configuration file describes one image; repositories with multiple images select separate files with `--config PATH`. `push` accepts either a prepared directory or a prebuilt ZIP. It creates a deterministic ZIP for directories, preserves an existing ZIP byte-for-byte, uploads the content-addressed artifact through the Rust AWS SDK, creates or updates the named image, and waits for the exact returned image version to become active. With no path it uses `[push].context`; `push --bundle PATH` remains available as a compatibility alias for a prebuilt ZIP. ClankerVM stores no local deployment state and has no AWS CLI dependency. See the [CLI configuration reference](crates/clankervm-cli/README.md) for schema version 1 and push/run/status defaults.
 
 `status` performs a one-shot inspection; `status --wait NAME@VERSION` waits for an exact release to become active.
 

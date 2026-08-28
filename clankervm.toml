@@ -1,6 +1,6 @@
 schema-version = 1
 
-[app]
+[image]
 name = "test"
 region = "us-west-2"
 
