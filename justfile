@@ -3,6 +3,9 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
+install:
+    cargo install --path crates/clankervm-cli --locked --force
+
 check:
     cargo check --workspace --all-targets
 
