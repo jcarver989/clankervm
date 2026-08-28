@@ -12,10 +12,19 @@ pub enum MicroVmClientError {
 }
 
 impl MicroVmClientError {
-    pub(super) fn service(operation: &'static str, error: impl std::fmt::Display) -> Self {
-        Self::Service {
-            operation,
-            message: error.to_string(),
+    pub(super) fn service(
+        operation: &'static str,
+        error: impl std::error::Error + 'static,
+    ) -> Self {
+        let mut message = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            let cause_message = cause.to_string();
+            if cause_message != "service error" {
+                message = cause_message;
+            }
+            source = cause.source();
         }
+        Self::Service { operation, message }
     }
 }
