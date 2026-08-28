@@ -1,10 +1,10 @@
-use crate::bundle::ZipBundle;
+use crate::artifact::Artifact;
 use crate::client::{
     ImageCapability, ImageConfiguration, ImageHooks, MicroVmClient, PruneImageVersionsRequest,
     PublishImageRequest,
 };
 use crate::output::{ReleaseProgress, render};
-use crate::release::{Release, ReleaseStatus, release_target, resolve_image, wait_for_release};
+use crate::release::{Release, ReleaseStatus, wait_for_release};
 use crate::util::{
     deserialize_optional_duration, non_empty_string, parse_duration, required_string,
 };
@@ -24,9 +24,9 @@ const DEFAULT_TERMINATE_TIMEOUT_SECONDS: i32 = 30;
 
 #[derive(Debug, Default, Args)]
 pub struct PushArgs {
-    /// Select a configured image profile.
-    #[arg(long)]
-    pub image: Option<String>,
+    /// Prepared directory to ZIP or an existing ZIP file. Overrides push.context.
+    #[arg(value_name = "PATH", conflicts_with = "bundle")]
+    pub source: Option<PathBuf>,
     /// Use an existing ZIP instead of bundling the configured context.
     #[arg(long)]
     pub bundle: Option<PathBuf>,
@@ -160,25 +160,30 @@ async fn push<T: MicroVmClient, U: FnMut(&ReleaseStatus)>(
     client: &T,
     report: U,
 ) -> Result<ReleaseStatus, ClankerError> {
-    let image = resolve_image(&project.config, args.image.as_deref(), None)?;
+    let image = project.config.resolve_image(None)?;
     let config = args.config.overlay(&image.push).resolve()?;
-    let bundle = load_bundle(args.bundle.as_deref(), &config, project)?;
+    let artifact = load_artifact(
+        args.source.as_deref(),
+        args.bundle.as_deref(),
+        &config,
+        project,
+    )?;
     let role = Arn::parse(&config.build_role_arn)?;
-    let identifier = release_target(&image, &config.build_role_arn)?.image_arn;
+    let identifier = image.target(&config.build_role_arn)?.image_arn;
 
-    eprintln!("› Publishing bundle {}", &bundle.digest[..12]);
+    eprintln!("› Publishing artifact {}", &artifact.digest[..12]);
 
     let published = client
         .publish_image(PublishImageRequest {
             image_identifier: identifier.clone(),
             name: image.name.clone(),
-            bundle: bundle.bytes,
-            bundle_digest: bundle.digest.clone(),
+            bundle: artifact.bytes,
+            bundle_digest: artifact.digest.clone(),
             artifact_bucket: config.artifact_bucket.clone(),
             configuration: resolve_image_configuration(
                 &config,
                 &image.region,
-                &bundle.digest,
+                &artifact.digest,
                 &role,
             )?,
             tags: config.tags.clone(),
@@ -189,7 +194,7 @@ async fn push<T: MicroVmClient, U: FnMut(&ReleaseStatus)>(
         &image.name,
         identifier.clone(),
         &published.image_version,
-        Some(bundle.digest),
+        Some(artifact.digest),
         Some(published.artifact_uri),
     );
 
@@ -205,21 +210,20 @@ async fn push<T: MicroVmClient, U: FnMut(&ReleaseStatus)>(
     Ok(result)
 }
 
-fn load_bundle(
-    path: Option<&std::path::Path>,
+fn load_artifact(
+    source: Option<&std::path::Path>,
+    bundle: Option<&std::path::Path>,
     config: &ResolvedPushConfig,
     project: &Project,
-) -> Result<ZipBundle, ClankerError> {
-    if let Some(path) = path {
-        let path = project.resolve(path);
-        return ZipBundle::from_path(&path).map_err(|source| ClankerError::Io {
-            action: format!("read bundle {}", path.display()),
-            source,
-        });
-    }
-    let context = project.resolve(&config.context);
-    ZipBundle::create(&context).map_err(|source| ClankerError::Io {
-        action: format!("create bundle from {}", context.display()),
+) -> Result<Artifact, ClankerError> {
+    let path = project.resolve(bundle.or(source).unwrap_or(&config.context));
+    let result = if bundle.is_some() {
+        Artifact::from_zip(&path)
+    } else {
+        Artifact::load(&path)
+    };
+    result.map_err(|source| ClankerError::Io {
+        action: format!("load artifact from {}", path.display()),
         source,
     })
 }
@@ -358,6 +362,30 @@ mod tests {
             panic!("expected prune call, got {calls:?}");
         };
         assert_eq!(request.versions_to_keep, 1);
+    }
+
+    #[tokio::test]
+    async fn push_uploads_a_prebuilt_zip_without_repacking_it() {
+        let directory = TempDir::new().unwrap();
+        let project = project(directory.path());
+        let zip_path = directory.path().join("image.zip");
+        let expected = Artifact::load(directory.path()).unwrap().bytes;
+        fs::write(&zip_path, &expected).unwrap();
+        let client = FakeMicroVmClient::builder()
+            .inspection_responses([Ok(Some(ObservedImageReleaseBuilder::active("1")))])
+            .build();
+        let args = PushArgs {
+            source: Some(zip_path),
+            ..PushArgs::default()
+        };
+
+        push(args, &project, &client, |_| {}).await.unwrap();
+
+        let calls = client.calls();
+        let MicroVmCall::PublishImage(request) = &calls[0] else {
+            panic!("expected publish call, got {calls:?}");
+        };
+        assert_eq!(request.bundle, expected);
     }
 
     #[tokio::test]

@@ -1,10 +1,7 @@
 use crate::client::{InspectImageRequest, MicroVmClient, ObservedImageRelease};
 use crate::config::ProjectConfig;
 use crate::output::{ReleaseProgress, render};
-use crate::release::{
-    Release, ReleaseStatus, configured_account_role, release_target, resolve_image,
-    wait_for_release,
-};
+use crate::release::{Release, ReleaseStatus, wait_for_release};
 use crate::util::{deserialize_optional_duration, parse_duration};
 use crate::{ClankerError, OutputFormat, Project};
 use clap::Args;
@@ -14,8 +11,6 @@ use std::time::Duration;
 #[derive(Debug, Default, Args)]
 pub struct StatusArgs {
     pub release: Option<String>,
-    #[arg(long)]
-    pub image: Option<String>,
     /// Wait until the release becomes active.
     #[arg(long)]
     pub wait: bool,
@@ -56,8 +51,8 @@ pub(super) async fn execute<T: MicroVmClient>(
     .await?;
     render(format, &result, || {
         format!(
-            "App:        {}\nRelease:    {}\nImage:      {}\nBuild:      {}\nActivation: {}\nLogs:       {}",
-            result.app,
+            "Image name:  {}\nRelease:    {}\nImage:      {}\nBuild:      {}\nActivation: {}\nLogs:       {}",
+            result.image_name,
             result.release,
             result.image_state,
             result.version_state,
@@ -77,13 +72,7 @@ where
     T: MicroVmClient,
     F: FnMut(&ReleaseStatus),
 {
-    let (release, observed) = resolve_release(
-        args.release.as_deref(),
-        args.image.as_deref(),
-        config,
-        client,
-    )
-    .await?;
+    let (release, observed) = resolve_release(args.release.as_deref(), config, client).await?;
     if args.wait {
         let timeout = args.config.overlay(&config.status).timeout();
         return wait_for_release(client, release, observed, timeout, report).await;
@@ -97,13 +86,12 @@ where
 
 async fn resolve_release<T: MicroVmClient>(
     requested: Option<&str>,
-    image: Option<&str>,
     config: &ProjectConfig,
     client: &T,
 ) -> Result<(Release, Option<ObservedImageRelease>), ClankerError> {
-    let image = resolve_image(config, image, requested)?;
-    let account_role = configured_account_role(&image)?;
-    let target = release_target(&image, account_role)?;
+    let image = config.resolve_image(requested)?;
+    let account_role = image.configured_account_role()?;
+    let target = image.target(account_role)?;
     if let Some(version) = target.version {
         return Ok((
             Release::new(&target.name, target.image_arn, &version, None, None),

@@ -2,7 +2,6 @@ use crate::client::{MicroVmClient, RunMicroVmRequest};
 use crate::config::ProjectConfig;
 use crate::output::render;
 use crate::payload::build_run_payload;
-use crate::release::{release_target, resolve_image};
 use crate::util::{non_empty_string, required_string};
 use crate::{Arn, ClankerError, OutputFormat, Project};
 use clap::Args;
@@ -14,8 +13,6 @@ const DEFAULT_MAX_DURATION: i32 = 3600;
 
 #[derive(Debug, Default, Args)]
 pub struct RunArgs {
-    #[arg(long)]
-    pub image: Option<String>,
     #[arg(long)]
     pub release: Option<String>,
     #[arg(long)]
@@ -111,7 +108,7 @@ pub async fn run<T: MicroVmClient>(
     config: &ProjectConfig,
     client: &T,
 ) -> Result<RunResult, ClankerError> {
-    let image = resolve_image(config, args.image.as_deref(), args.release.as_deref())?;
+    let image = config.resolve_image(args.release.as_deref())?;
     let region = &image.region;
     let run = args.config.overlay(&image.run).resolve()?;
     let (command, command_args) = args
@@ -124,7 +121,7 @@ pub async fn run<T: MicroVmClient>(
         .build_role_arn
         .as_deref()
         .unwrap_or(&run.execution_role_arn);
-    let target = release_target(&image, account_role)?;
+    let target = image.target(account_role)?;
     let execution_role = Arn::parse(&run.execution_role_arn)?;
     let log_group = run.log_group.clone();
     let request = RunMicroVmRequest {
@@ -217,7 +214,7 @@ mod tests {
         });
         let client = FakeMicroVmClient::default();
         let args = RunArgs {
-            release: Some("other@7".into()),
+            release: Some("demo@7".into()),
             client_token: Some("run-42".into()),
             config: RunConfig {
                 ingress: Some("PUBLIC_INGRESS".into()),
@@ -225,7 +222,6 @@ mod tests {
                 ..RunConfig::default()
             },
             command: vec!["echo".into()],
-            ..RunArgs::default()
         };
 
         run(args, &config, &client).await.unwrap();
@@ -236,7 +232,7 @@ mod tests {
         };
         assert_eq!(
             request.image_identifier.as_str(),
-            "arn:aws:lambda:us-east-1:123456789012:microvm-image:other"
+            "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
         );
         assert_eq!(request.image_version.as_deref(), Some("7"));
         assert!(

@@ -1,5 +1,5 @@
 mod arn;
-mod bundle;
+mod artifact;
 mod client;
 mod commands;
 mod config;

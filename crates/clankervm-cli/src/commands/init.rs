@@ -53,7 +53,7 @@ pub(super) fn execute(
 
 fn template(args: &InitArgs) -> String {
     let mut text = format!(
-        "schema-version = 1\n\n[app]\nname = {}\nregion = {}\n\n[push]\ncontext = \".\"\n",
+        "schema-version = 1\n\n[image]\nname = {}\nregion = {}\n\n[push]\ncontext = \".\"\n",
         toml_string(&args.name),
         toml_string(&args.region)
     );
@@ -113,8 +113,8 @@ mod tests {
         fs::write(&path, template(&args)).unwrap();
         let config = ProjectConfig::load(&path).unwrap();
 
-        assert_eq!(config.app.name, args.name);
-        assert_eq!(config.app.region, args.region);
+        assert_eq!(config.image.name, args.name);
+        assert_eq!(config.image.region, args.region);
         assert_eq!(config.push.artifact_bucket, args.artifact_bucket);
     }
 }

@@ -1,7 +1,6 @@
-use crate::client::{ImageState, ImageVersionState, ImageVersionStatus, ObservedImageRelease};
+use crate::client::ObservedImageRelease;
 use crate::commands::{PushConfig, RunConfig, StatusConfig};
-use crate::config::{AppConfig, ImageConfig, Project, ProjectConfig};
-use std::collections::BTreeMap;
+use crate::config::{ImageConfig, Project, ProjectConfig};
 use std::path::{Path, PathBuf};
 
 pub(crate) struct ProjectConfigBuilder {
@@ -10,7 +9,6 @@ pub(crate) struct ProjectConfigBuilder {
     push: PushConfig,
     status: StatusConfig,
     run: RunConfig,
-    images: BTreeMap<String, ImageConfig>,
 }
 
 impl ProjectConfigBuilder {
@@ -21,7 +19,6 @@ impl ProjectConfigBuilder {
             push: PushConfig::default(),
             status: StatusConfig::default(),
             run: RunConfig::default(),
-            images: BTreeMap::new(),
         }
     }
 
@@ -35,22 +32,16 @@ impl ProjectConfigBuilder {
         self
     }
 
-    pub(crate) fn image(mut self, name: &str, image: ImageConfig) -> Self {
-        self.images.insert(name.into(), image);
-        self
-    }
-
     pub(crate) fn build(self) -> ProjectConfig {
         ProjectConfig {
             schema_version: 1,
-            app: AppConfig {
+            image: ImageConfig {
                 name: self.name,
                 region: self.region,
             },
             push: self.push,
             status: self.status,
             run: self.run,
-            image: self.images,
         }
     }
 }
@@ -84,32 +75,15 @@ pub(crate) struct ObservedImageReleaseBuilder {
 
 impl ObservedImageReleaseBuilder {
     pub(crate) fn active(version: &str) -> ObservedImageRelease {
-        Self::new(
-            version,
-            ImageState::Created,
-            ImageVersionState::Successful,
-            ImageVersionStatus::Active,
-        )
-        .build()
+        Self::new(version, "CREATED", "SUCCESSFUL", "ACTIVE").build()
     }
 
     pub(crate) fn pending(version: &str) -> ObservedImageRelease {
-        Self::new(
-            version,
-            ImageState::Creating,
-            ImageVersionState::InProgress,
-            ImageVersionStatus::Inactive,
-        )
-        .build()
+        Self::new(version, "CREATING", "IN_PROGRESS", "INACTIVE").build()
     }
 
     pub(crate) fn failed(version: &str) -> Self {
-        Self::new(
-            version,
-            ImageState::Created,
-            ImageVersionState::Failed,
-            ImageVersionStatus::Inactive,
-        )
+        Self::new(version, "CREATED", "FAILED", "INACTIVE")
     }
 
     pub(crate) fn reason(mut self, reason: &str) -> Self {
@@ -121,18 +95,13 @@ impl ObservedImageReleaseBuilder {
         self.release
     }
 
-    fn new(
-        version: &str,
-        image_state: ImageState,
-        version_state: ImageVersionState,
-        version_status: ImageVersionStatus,
-    ) -> Self {
+    fn new(version: &str, image_state: &str, version_state: &str, version_status: &str) -> Self {
         Self {
             release: ObservedImageRelease {
                 image_version: version.into(),
-                image_state,
-                version_state,
-                version_status,
+                image_state: image_state.into(),
+                version_state: version_state.into(),
+                version_status: version_status.into(),
                 state_reason: None,
             },
         }

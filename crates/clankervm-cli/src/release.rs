@@ -1,17 +1,14 @@
-use crate::client::{ImageReleasePhase, InspectImageRequest, MicroVmClient, ObservedImageRelease};
-use crate::config::{ProjectConfig, SelectedImage};
-use crate::util::parse_release;
+use crate::client::{InspectImageRequest, MicroVmClient, ObservedImageRelease, ReleasePhase};
 use crate::{Arn, ClankerError};
-use futures_util::StreamExt;
 use serde::Serialize;
 use std::time::Duration;
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, sleep, sleep_until};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub(crate) struct Release {
-    app: String,
+    image_name: String,
     identifier: String,
     image_arn: Arn,
     image_version: String,
@@ -22,20 +19,20 @@ pub(crate) struct Release {
 
 impl Release {
     pub(crate) fn new(
-        app: &str,
+        image_name: &str,
         image_arn: Arn,
         image_version: &str,
         bundle_digest: Option<String>,
         artifact_uri: Option<String>,
     ) -> Self {
         Self {
-            app: app.into(),
-            identifier: format!("{app}@{image_version}"),
+            image_name: image_name.into(),
+            identifier: format!("{image_name}@{image_version}"),
             image_arn,
             image_version: image_version.into(),
             bundle_digest,
             artifact_uri,
-            build_log_group: format!("/aws/lambda-microvms/{app}"),
+            build_log_group: format!("/aws/lambda-microvms/{image_name}"),
         }
     }
 
@@ -51,15 +48,15 @@ impl Release {
             || ("PENDING".into(), "PENDING".into(), "INACTIVE".into(), None),
             |observed| {
                 (
-                    observed.image_state.as_str().into(),
-                    observed.version_state.as_str().into(),
-                    observed.version_status.as_str().into(),
+                    observed.image_state.clone(),
+                    observed.version_state.clone(),
+                    observed.version_status.clone(),
                     observed.state_reason.clone(),
                 )
             },
         );
         ReleaseStatus {
-            app: self.app.clone(),
+            image_name: self.image_name.clone(),
             release: self.identifier.clone(),
             image_arn: self.image_arn.clone(),
             image_version: self.image_version.clone(),
@@ -77,7 +74,7 @@ impl Release {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReleaseStatus {
-    pub app: String,
+    pub image_name: String,
     pub release: String,
     pub image_arn: Arn,
     pub image_version: String,
@@ -88,75 +85,6 @@ pub(crate) struct ReleaseStatus {
     pub bundle_digest: Option<String>,
     pub artifact_uri: Option<String>,
     pub build_log_group: String,
-}
-
-pub(crate) struct ResolvedImage {
-    pub name: String,
-    pub region: String,
-    pub push: crate::commands::PushConfig,
-    pub run: crate::commands::RunConfig,
-    pub version: Option<String>,
-}
-
-pub(crate) fn resolve_image(
-    config: &ProjectConfig,
-    image: Option<&str>,
-    release: Option<&str>,
-) -> Result<ResolvedImage, ClankerError> {
-    let parsed = release.map(parse_release).transpose()?;
-    let release_name = parsed.map(|(name, _)| name);
-    let version = parsed.map(|(_, version)| version.to_owned());
-    let SelectedImage {
-        name,
-        region,
-        push,
-        run,
-    } = config.select_image(image, release_name)?;
-    Ok(ResolvedImage {
-        name,
-        region,
-        push,
-        run,
-        version,
-    })
-}
-
-pub(crate) struct ReleaseTarget {
-    pub name: String,
-    pub version: Option<String>,
-    pub image_arn: Arn,
-}
-
-pub(crate) fn release_target(
-    image: &ResolvedImage,
-    account_role: &str,
-) -> Result<ReleaseTarget, ClankerError> {
-    let account = account_from_role(account_role)?;
-    Ok(ReleaseTarget {
-        name: image.name.clone(),
-        version: image.version.clone(),
-        image_arn: Arn::image(&image.name, &image.region, account)?,
-    })
-}
-
-pub(crate) fn configured_account_role(image: &ResolvedImage) -> Result<&str, ClankerError> {
-    image
-        .push
-        .build_role_arn
-        .as_deref()
-        .or(image.run.execution_role_arn.as_deref())
-        .ok_or_else(|| {
-            ClankerError::InvalidConfig(
-                "push.build-role-arn or run.execution-role-arn must be configured".into(),
-            )
-        })
-}
-
-fn account_from_role(role: &str) -> Result<&str, ClankerError> {
-    role.split(':')
-        .nth(4)
-        .filter(|account| !account.is_empty())
-        .ok_or_else(|| ClankerError::InvalidConfig(format!("invalid IAM role ARN `{role}`")))
 }
 
 pub(crate) async fn wait_for_release<T, F>(
@@ -170,43 +98,40 @@ where
     T: MicroVmClient,
     F: FnMut(&ReleaseStatus),
 {
-    let mut updates =
-        Box::pin(client.poll_image_release(release.inspect_request(), observed, POLL_INTERVAL));
     let deadline = Instant::now() + timeout;
-    let mut first = true;
+    let mut observed = observed;
     loop {
-        let update = if first {
-            first = false;
-            updates.next().await
+        let current = if let Some(observed) = observed.take() {
+            Some(observed)
         } else {
             tokio::select! {
-                update = updates.next() => update,
+                result = client.inspect_image(release.inspect_request()) => result?,
                 () = sleep_until(deadline) => return Err(wait_timeout(&release, timeout)),
             }
         };
-        let observed =
-            update.expect("image release stream only ends after a terminal observation")?;
-        let Some(observed) = observed else {
-            if Instant::now() >= deadline {
-                return Err(wait_timeout(&release, timeout));
+
+        if let Some(current) = current {
+            let phase = current.phase();
+            let status = release.status(Some(&current));
+            report(&status);
+            match phase {
+                ReleasePhase::Pending => {}
+                ReleasePhase::Ready => return Ok(status),
+                ReleasePhase::Failed => {
+                    return Err(ClankerError::ReleaseFailed {
+                        release: status.release,
+                        reason: status
+                            .state_reason
+                            .unwrap_or_else(|| "AWS did not provide a failure reason".into()),
+                        log_group: status.build_log_group,
+                    });
+                }
             }
-            continue;
-        };
-        let phase = observed.phase();
-        let status = release.status(Some(&observed));
-        report(&status);
-        match phase {
-            ImageReleasePhase::Pending => {}
-            ImageReleasePhase::Ready => return Ok(status),
-            ImageReleasePhase::Failed => {
-                return Err(ClankerError::ReleaseFailed {
-                    release: status.release,
-                    reason: status
-                        .state_reason
-                        .unwrap_or_else(|| "AWS did not provide a failure reason".into()),
-                    log_group: status.build_log_group,
-                });
-            }
+        }
+
+        tokio::select! {
+            () = sleep(POLL_INTERVAL) => {}
+            () = sleep_until(deadline) => return Err(wait_timeout(&release, timeout)),
         }
     }
 }

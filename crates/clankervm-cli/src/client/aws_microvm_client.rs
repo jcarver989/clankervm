@@ -1,8 +1,8 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    ImageCapability, ImageHooks, ImageState, ImageVersionState, ImageVersionStatus,
-    InspectImageRequest, MicroVmClient, ObservedImageRelease, PruneImageVersionsRequest,
-    PublishImageRequest, PublishedImage, RunMicroVmRequest, RunMicroVmResponse,
+    ImageCapability, ImageHooks, InspectImageRequest, MicroVmClient, ObservedImageRelease,
+    PruneImageVersionsRequest, PublishImageRequest, PublishedImage, RunMicroVmRequest,
+    RunMicroVmResponse,
 };
 use crate::{Arn, Tags};
 use aws_config::SdkConfig;
@@ -219,7 +219,7 @@ impl MicroVmClient for AwsMicroVmClient {
         let Some(image) = self.get_image(request.image_identifier.as_str()).await? else {
             return Ok(None);
         };
-        let image_state = ImageState::from_aws(image.state().as_str());
+        let image_state = image.state().as_str().to_owned();
         let image_version = request
             .image_version
             .or(image.latest_active_image_version)
@@ -233,8 +233,8 @@ impl MicroVmClient for AwsMicroVmClient {
         else {
             return Ok(None);
         };
-        let version_state = ImageVersionState::from_aws(version.state().as_str());
-        let version_status = ImageVersionStatus::from_aws(version.status().as_str());
+        let version_state = version.state().as_str().to_owned();
+        let version_status = version.status().as_str().to_owned();
         Ok(Some(ObservedImageRelease {
             image_version,
             image_state,

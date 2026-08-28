@@ -86,6 +86,19 @@ fn push_flags_mirror_flat_config_values() {
 }
 
 #[test]
+fn push_accepts_a_directory_or_zip_path() {
+    for path in ["prepared-directory", "prepared-image.zip"] {
+        let cli = Cli::try_parse_from(["clankervm", "push", path]).unwrap();
+        let ClankerCommand::Push(push) = cli.command else {
+            panic!("expected push command");
+        };
+        assert_eq!(push.source.as_deref(), Some(std::path::Path::new(path)));
+    }
+
+    assert!(Cli::try_parse_from(["clankervm", "push", "image", "--bundle", "image.zip"]).is_err());
+}
+
+#[test]
 fn status_owns_waiting_and_removed_options_are_rejected() {
     let cli = Cli::try_parse_from(["clankervm", "status", "demo@2", "--wait", "--timeout", "5m"])
         .unwrap();
@@ -99,6 +112,9 @@ fn status_owns_waiting_and_removed_options_are_rejected() {
         vec!["clankervm", "bundle"],
         vec!["clankervm", "wait"],
         vec!["clankervm", "push", "--detach"],
+        vec!["clankervm", "push", "--image", "agent"],
+        vec!["clankervm", "status", "--image", "agent"],
+        vec!["clankervm", "run", "--image", "agent", "--", "echo"],
         vec!["clankervm", "push", "--poll-interval", "1s"],
         vec!["clankervm", "push", "--capability", "NOPE"],
         vec!["clankervm", "push", "--timeout", "eventually"],
@@ -134,7 +150,8 @@ fn init_only_creates_the_project_file() {
     assert!(text.contains("[run]"), "{text}");
     assert!(text.contains("# execution-role-arn = "), "{text}");
     assert!(!text.contains("[bundle]"), "{text}");
-    assert!(!text.contains("[image]"), "{text}");
+    assert!(text.contains("[image]"), "{text}");
+    assert!(!text.contains("[app]"), "{text}");
     assert!(!directory.path().join(".gitignore").exists());
     assert!(!directory.path().join(".clankervm").exists());
 }
@@ -170,7 +187,7 @@ fn status_resolves_the_image_from_the_execution_role_alone() {
     fs::write(
         directory.path().join("clankervm.toml"),
         r#"schema-version = 1
-[app]
+[image]
 name = "demo"
 region = "us-east-1"
 [run]
@@ -330,7 +347,7 @@ fn write_config(directory: &std::path::Path) {
     fs::write(
         directory.join("clankervm.toml"),
         r#"schema-version = 1
-[app]
+[image]
 name = "demo"
 region = "us-east-1"
 [push]

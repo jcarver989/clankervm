@@ -17,12 +17,12 @@ AWS credentials use the standard AWS SDK credential chain and are never stored i
 
 ## Configuration (schema version 1)
 
-`clankervm.toml` keeps the AWS region in `[app]`. A single-image project can use the legacy flat `[push]` and `[run]` sections. Multi-image projects define each image under one `[image.<name>]` table; status waiting has its own independent timeout under `[status]`.
+Each configuration file describes exactly one image. Repositories with multiple images use one file per image and select it with the global `--config PATH` option. ClankerVM intentionally has no profile inheritance or configuration includes.
 
 ```toml
 schema-version = 1
 
-[app]
+[image]
 name = "my-runner"
 region = "us-west-2"
 
@@ -63,43 +63,34 @@ clankervm push --context image --base-image al2023-1 \
 
 For every setting, command-line values take precedence over TOML values, which take precedence over built-in defaults. `--bundle PATH` is intentionally invocation-only and supplies an existing ZIP instead of `[push].context`. Tags must be `key=value`; malformed and duplicate tag keys are rejected. Unknown configuration fields are rejected.
 
-Projects may define multiple named image profiles. Root `[push]` and `[run]` values are shared defaults, and each profile overrides only the values specified under its own table; `[app].region` and `[status]` remain global:
+For multiple images, keep each deployment unit explicit:
 
-```toml
-[image.agent]
-context = "agent"
-artifact-bucket = "my-microvm-artifacts"
-build-role-arn = "arn:aws:iam::123456789012:role/Build"
-execution-role-arn = "arn:aws:iam::123456789012:role/RunAgent"
-log-group = "/agent/microvms"
-run-egress = "INTERNET_EGRESS"
-
-[image.worker]
-context = "worker"
-artifact-bucket = "my-microvm-artifacts"
-build-role-arn = "arn:aws:iam::123456789012:role/Build"
-execution-role-arn = "arn:aws:iam::123456789012:role/RunWorker"
-log-group = "/worker/microvms"
+```sh
+clankervm --config images/agent/clankervm.toml push
+clankervm --config images/worker/clankervm.toml push
 ```
 
-When profiles are present, `push`, `status`, and `run` require `--image NAME` for the latest image. An explicit release such as `status agent@42` or `run --release agent@42` selects the profile automatically; passing a conflicting `--image` is rejected. The selected profile name is used for the image ARN, release, build logs, and S3 prefix. Precedence is CLI flags, then the selected profile, then root `[push]` and `[run]`, then built-in defaults. With no profiles, the legacy flat `[push]` and `[run]` configuration remains unchanged.
+An explicit release such as `status my-runner@42` or `run --release my-runner@42` must match the image name in the selected configuration file.
 
-ClankerVM does not compile or prepare application assets. Prepare the directory configured by `push.context` with Docker, a shell script, `just`, Bazel, Nix, or another build system first.
+ClankerVM does not compile or prepare application assets. Prepare an image directory or ZIP with Docker, a shell script, `just`, Bazel, Nix, or another build system first.
 
 ## Push
 
-`push` creates a deterministic ZIP from `push.context`, uploads it under an immutable content-addressed S3 key, creates or updates the image, and waits for the exact version returned by AWS. After activation, `keep-versions = N` deletes inactive versions beyond the newest N.
+`push` accepts either a prepared directory or a prebuilt ZIP. A directory is converted to a deterministic ZIP; an existing ZIP is validated and uploaded byte-for-byte. In both cases ClankerVM uses an immutable content-addressed S3 key, creates or updates the image through the Rust AWS SDK, and waits for the exact version returned by AWS. After activation, `keep-versions = N` deletes inactive versions beyond the newest N.
+
+With no path, `push` uses `[push].context`. The positional path overrides it. The invocation-only `--bundle` option remains supported for compatibility and is equivalent to passing the ZIP as the positional path.
 
 ```sh
 clankervm push
-clankervm push --image agent --bundle path/to/image.zip
+clankervm push path/to/prepared-directory
+clankervm push path/to/image.zip
+clankervm push --bundle path/to/image.zip
 ```
 
 ## Status
 
 ```sh
 clankervm status
-clankervm status --image agent
 clankervm status my-runner@42
 clankervm status --wait my-runner@42
 clankervm status --wait --timeout 10m my-runner@42
@@ -111,7 +102,7 @@ clankervm status --wait --timeout 10m my-runner@42
 
 ```sh
 clankervm run -- /usr/local/bin/my-job --job-id 42
-clankervm run --image agent --release agent@42 --client-token "$RUN_ID" -- ./job
+clankervm run --release my-runner@42 --client-token "$RUN_ID" -- ./job
 ```
 
 Run flags mirror `[run]` keys, including `--max-duration` and `max-duration`. The explicit command and arguments share AWS's 4096-byte run-hook payload limit.

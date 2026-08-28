@@ -7,19 +7,30 @@ use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
 #[derive(Clone, Debug)]
-pub struct ZipBundle {
+pub struct Artifact {
     pub bytes: Vec<u8>,
     pub digest: String,
 }
 
-impl ZipBundle {
-    pub fn from_path(path: &Path) -> io::Result<Self> {
+impl Artifact {
+    /// Loads an existing ZIP file or creates a deterministic ZIP from a directory.
+    pub fn load(path: &Path) -> io::Result<Self> {
+        if path.is_dir() {
+            Self::from_directory(path)
+        } else {
+            Self::from_zip(path)
+        }
+    }
+
+    pub(crate) fn from_zip(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
+        // Validate the input now so an arbitrary file is not uploaded as a bundle.
+        zip::ZipArchive::new(Cursor::new(&bytes)).map_err(zip_error)?;
         let digest = sha256_hex(&bytes);
         Ok(Self { bytes, digest })
     }
 
-    pub(crate) fn create(context: &Path) -> io::Result<Self> {
+    fn from_directory(context: &Path) -> io::Result<Self> {
         let mut paths = Vec::new();
         collect(context, &mut paths)?;
         paths.sort();
@@ -88,13 +99,41 @@ mod tests {
         fs::create_dir(directory.path().join("empty")).unwrap();
         fs::write(directory.path().join("nested/file"), "content").unwrap();
 
-        let first = ZipBundle::create(directory.path()).unwrap();
-        let second = ZipBundle::create(directory.path()).unwrap();
+        let first = Artifact::load(directory.path()).unwrap();
+        let second = Artifact::load(directory.path()).unwrap();
 
         assert_eq!(first.digest, second.digest);
         assert_eq!(first.bytes, second.bytes);
         let mut archive = zip::ZipArchive::new(Cursor::new(first.bytes)).unwrap();
         assert!(archive.by_name("nested/file").is_ok());
         assert!(archive.by_name("empty/").is_ok());
+    }
+
+    #[test]
+    fn existing_zip_is_loaded_without_repacking() {
+        let directory = TempDir::new().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file"), "content").unwrap();
+        let created = Artifact::load(&source).unwrap();
+        let zip_path = directory.path().join("bundle.zip");
+        fs::write(&zip_path, &created.bytes).unwrap();
+
+        let loaded = Artifact::load(&zip_path).unwrap();
+
+        assert_eq!(loaded.bytes, created.bytes);
+        assert_eq!(loaded.digest, created.digest);
+    }
+
+    #[test]
+    fn existing_non_zip_file_is_rejected() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("not-a-zip");
+        fs::write(&path, "content").unwrap();
+
+        assert_eq!(
+            Artifact::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

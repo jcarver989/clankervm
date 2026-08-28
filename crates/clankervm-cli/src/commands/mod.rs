@@ -18,7 +18,7 @@ use std::path::PathBuf;
 pub enum Command {
     /// Create a new ClankerVM project file.
     Init(InitArgs),
-    /// Bundle the configured context and release a new image version.
+    /// Release a prepared directory or ZIP as a new image version.
     Push(PushArgs),
     /// Inspect a release, optionally waiting for it to become active.
     Status(StatusArgs),
@@ -38,7 +38,7 @@ pub(crate) async fn execute(
 
     let project = Project::load(&config_path, region)?;
     let sdk = aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new(project.config.app.region.clone()))
+        .region(Region::new(project.config.image.region.clone()))
         .load()
         .await;
 

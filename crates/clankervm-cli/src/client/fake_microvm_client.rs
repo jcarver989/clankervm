@@ -140,10 +140,8 @@ impl MicroVmClient for FakeMicroVmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::microvm_client::{ImageReleasePhase, InspectImageRequest};
+    use crate::client::InspectImageRequest;
     use crate::test_support::ObservedImageReleaseBuilder;
-    use futures_util::StreamExt;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn fake_scripts_inspections_and_records_high_level_calls() {
@@ -171,30 +169,5 @@ mod tests {
                 MicroVmCall::InspectImage(request),
             ]
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn polling_emits_observations_until_the_release_is_terminal() {
-        let pending = ObservedImageReleaseBuilder::pending("2");
-        let active = ObservedImageReleaseBuilder::active("2");
-        let client = FakeMicroVmClient::builder()
-            .inspection_responses([Ok(Some(active))])
-            .build();
-        let request = InspectImageRequest {
-            image_identifier: crate::Arn::parse(
-                "arn:aws:lambda:region:account:microvm-image:image",
-            )
-            .unwrap(),
-            image_version: Some("2".into()),
-        };
-        let mut updates =
-            Box::pin(client.poll_image_release(request, Some(pending), Duration::from_secs(2)));
-
-        let first = updates.next().await.unwrap().unwrap().unwrap();
-        assert_eq!(first.phase(), ImageReleasePhase::Pending);
-        let second = updates.next().await.unwrap().unwrap().unwrap();
-        assert_eq!(second.phase(), ImageReleasePhase::Ready);
-        assert!(updates.next().await.is_none());
-        assert_eq!(client.calls().len(), 1);
     }
 }
