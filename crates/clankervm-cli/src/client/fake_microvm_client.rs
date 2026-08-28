@@ -4,6 +4,7 @@ use super::microvm_client::{
     PublishImageRequest, PublishedImage, RunMicroVmRequest, RunMicroVmResponse,
 };
 use std::collections::VecDeque;
+use std::future::{Future, ready};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,10 +89,10 @@ impl FakeMicroVmClientBuilder {
 }
 
 impl MicroVmClient for FakeMicroVmClient {
-    async fn publish_image(
+    fn publish_image(
         &self,
         request: PublishImageRequest,
-    ) -> Result<PublishedImage, MicroVmClientError> {
+    ) -> impl Future<Output = Result<PublishedImage, MicroVmClientError>> {
         let default = PublishedImage {
             image_version: "1".into(),
             artifact_uri: format!(
@@ -101,39 +102,39 @@ impl MicroVmClient for FakeMicroVmClient {
         };
         let mut state = self.state.lock().expect("fake mutex poisoned");
         state.calls.push(MicroVmCall::PublishImage(request));
-        state.publish_responses.pop_front().unwrap_or(Ok(default))
+        ready(state.publish_responses.pop_front().unwrap_or(Ok(default)))
     }
 
-    async fn inspect_image(
+    fn inspect_image(
         &self,
         request: InspectImageRequest,
-    ) -> Result<Option<ObservedImageRelease>, MicroVmClientError> {
+    ) -> impl Future<Output = Result<Option<ObservedImageRelease>, MicroVmClientError>> {
         let mut state = self.state.lock().expect("fake mutex poisoned");
         state.calls.push(MicroVmCall::InspectImage(request));
-        state.inspection_responses.pop_front().unwrap_or(Ok(None))
+        ready(state.inspection_responses.pop_front().unwrap_or(Ok(None)))
     }
 
-    async fn prune_image_versions(
+    fn prune_image_versions(
         &self,
         request: PruneImageVersionsRequest,
-    ) -> Result<(), MicroVmClientError> {
+    ) -> impl Future<Output = Result<(), MicroVmClientError>> {
         let mut state = self.state.lock().expect("fake mutex poisoned");
         state.calls.push(MicroVmCall::PruneImageVersions(request));
-        state.prune_responses.pop_front().unwrap_or(Ok(()))
+        ready(state.prune_responses.pop_front().unwrap_or(Ok(())))
     }
 
-    async fn run_microvm(
+    fn run_microvm(
         &self,
         request: RunMicroVmRequest,
-    ) -> Result<RunMicroVmResponse, MicroVmClientError> {
+    ) -> impl Future<Output = Result<RunMicroVmResponse, MicroVmClientError>> {
         let mut state = self.state.lock().expect("fake mutex poisoned");
         state.calls.push(MicroVmCall::RunMicroVm(request));
-        state.run_responses.pop_front().unwrap_or_else(|| {
+        ready(state.run_responses.pop_front().unwrap_or_else(|| {
             Ok(RunMicroVmResponse {
                 microvm_id: "microvm-fake".into(),
                 image_version: "1".into(),
             })
-        })
+        }))
     }
 }
 

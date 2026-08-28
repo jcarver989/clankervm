@@ -18,6 +18,9 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
+doc-check:
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --document-private-items
+
 release-pr-preview:
     release-plz release-pr --dry-run
 
