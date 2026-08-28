@@ -1,4 +1,6 @@
 [workspace]
+git_only = true
+release_always = false
 git_release_enable = false
 git_tag_name = "{{ package }}-v{{ version }}"
 pr_branch_prefix = "release-plz/"
