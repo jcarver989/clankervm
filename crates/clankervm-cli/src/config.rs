@@ -1,4 +1,5 @@
 use crate::commands::{PushConfig, RunConfig, StatusConfig};
+use crate::environment::RunEnvironment;
 use crate::util::{parse_release, validate_non_empty};
 use crate::{Arn, ClankerError, Tags};
 use serde::Deserialize;
@@ -101,6 +102,7 @@ fn validate_run(config: &RunConfig) -> Result<(), ClankerError> {
         "run.execution-role-arn",
     )?;
     validate_non_empty(config.log_group.as_deref(), "run.log-group")?;
+    RunEnvironment::parse(config.environment.as_deref().unwrap_or_default())?;
     validate_non_empty(config.ingress.as_deref(), "run.ingress")?;
     validate_non_empty(config.egress.as_deref(), "run.egress")
 }

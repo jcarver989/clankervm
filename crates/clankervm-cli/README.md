@@ -48,6 +48,7 @@ timeout = "1h"
 
 [run]
 command = ["/usr/local/bin/my-job", "--job-id", "42"]
+environment = ["LOG_LEVEL=info", "DRY_RUN=false"]
 execution-role-arn = "arn:aws:iam::123456789012:role/MicroVmExecutionRole"
 log-group = "/my-runner/microvms"
 max-duration = 3600
@@ -104,10 +105,10 @@ clankervm status --wait --timeout 10m my-runner@42
 
 ```sh
 clankervm run -- /usr/local/bin/my-job --job-id 42
-clankervm run --release my-runner@42 --client-token "$RUN_ID" -- ./job
+clankervm run --release my-runner@42 --client-token "$RUN_ID" --env LOG_LEVEL=debug -- ./job
 ```
 
-Run flags mirror `[run]` keys, including `--max-duration` and `max-duration`. `run.command` provides a default executable and arguments; a command passed after `--` takes precedence. A command is required from one of those sources, and its payload shares AWS's 4096-byte run-hook limit.
+Run flags mirror `[run]` keys, including `--max-duration` and `max-duration`. `run.command` provides a default executable and arguments; a command passed after `--` takes precedence. `run.environment` accepts `key=value` entries and repeatable `--env key=value` flags override the configured environment. Empty values are supported, malformed or duplicate keys are rejected, and `AWS_REGION` plus `AWS_DEFAULT_REGION` are set from `image.region`. A command is required from TOML or the CLI, and the complete payload shares AWS's 4096-byte run-hook limit.
 
 ## JSON output
 

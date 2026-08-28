@@ -1,7 +1,8 @@
 use crate::client::{MicroVmClient, RunMicroVmRequest};
 use crate::config::ProjectConfig;
+use crate::environment::RunEnvironment;
 use crate::output::render;
-use crate::payload::build_run_payload;
+use crate::payload::build_run_payload_with_environment;
 use crate::util::{non_empty_string, required_string};
 use crate::{Arn, ClankerError, OutputFormat, Project};
 use clap::Args;
@@ -36,6 +37,8 @@ pub struct RunConfig {
     pub egress: Option<String>,
     #[arg(long)]
     pub max_duration: Option<i32>,
+    #[arg(long = "env")]
+    pub environment: Option<Vec<String>>,
     #[arg(long)]
     pub log_group: Option<String>,
 }
@@ -50,6 +53,7 @@ impl RunConfig {
             ingress: self.ingress.or_else(|| lower.ingress.clone()),
             egress: self.egress.or_else(|| lower.egress.clone()),
             max_duration: self.max_duration.or(lower.max_duration),
+            environment: self.environment.or_else(|| lower.environment.clone()),
             log_group: self.log_group.or_else(|| lower.log_group.clone()),
         }
     }
@@ -63,6 +67,7 @@ impl RunConfig {
             egress: non_empty_string(self.egress, "run.egress")?
                 .unwrap_or_else(|| DEFAULT_EGRESS.into()),
             max_duration: self.max_duration.unwrap_or(DEFAULT_MAX_DURATION),
+            environment: RunEnvironment::parse(self.environment.as_deref().unwrap_or_default())?,
             log_group: non_empty_string(self.log_group, "run.log-group")?,
         })
     }
@@ -74,6 +79,7 @@ struct ResolvedRunConfig {
     ingress: String,
     egress: String,
     max_duration: i32,
+    environment: RunEnvironment,
     log_group: Option<String>,
 }
 
@@ -131,7 +137,12 @@ pub async fn run<T: MicroVmClient>(
             "run.command executable cannot be empty".into(),
         ));
     }
-    let payload = build_run_payload(command, command_args, region)?;
+    let payload = build_run_payload_with_environment(
+        command,
+        command_args,
+        run.environment.into_inner(),
+        region,
+    )?;
     let account_role = image
         .push
         .build_role_arn
@@ -227,6 +238,7 @@ mod tests {
         let config = config(RunConfig {
             command: Some(vec!["echo".into(), "from config".into()]),
             execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
+            environment: Some(vec!["GREETING=hello".into()]),
             ..RunConfig::default()
         });
         let client = FakeMicroVmClient::default();
@@ -240,6 +252,7 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_str(&request.run_hook_payload).unwrap();
         assert_eq!(payload["command"], "echo");
         assert_eq!(payload["args"], serde_json::json!(["from config"]));
+        assert_eq!(payload["environment"]["GREETING"], "hello");
     }
 
     #[tokio::test]
@@ -294,6 +307,11 @@ mod tests {
             RunConfig {
                 execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
                 ingress: Some(" ".into()),
+                ..RunConfig::default()
+            },
+            RunConfig {
+                execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
+                environment: Some(vec!["INVALID".into()]),
                 ..RunConfig::default()
             },
         ] {

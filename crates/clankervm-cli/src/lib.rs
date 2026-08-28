@@ -3,6 +3,7 @@ mod artifact;
 mod client;
 mod commands;
 mod config;
+mod environment;
 mod output;
 mod payload;
 mod release;
@@ -18,7 +19,7 @@ use thiserror::Error;
 
 pub use client::MicroVmClientError;
 pub use commands::Command;
-pub use payload::{PayloadError, build_run_payload};
+pub use payload::{PayloadError, build_run_payload, build_run_payload_with_environment};
 
 pub(crate) use arn::Arn;
 pub(crate) use client::AwsMicroVmClient;

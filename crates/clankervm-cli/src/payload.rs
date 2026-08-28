@@ -8,6 +8,8 @@ const MAX_PAYLOAD_BYTES: usize = 4096;
 pub enum PayloadError {
     #[error("{field} must not contain NUL bytes")]
     InvalidNul { field: &'static str },
+    #[error("environment contains an invalid key or value")]
+    InvalidEnvironment,
     #[error("run hook payload is {size} bytes; AWS allows at most {limit}")]
     TooLarge { size: usize, limit: usize },
 }
@@ -17,6 +19,15 @@ pub fn build_run_payload(
     args: &[String],
     region: &str,
 ) -> Result<String, PayloadError> {
+    build_run_payload_with_environment(command, args, BTreeMap::new(), region)
+}
+
+pub fn build_run_payload_with_environment(
+    command: &str,
+    args: &[String],
+    mut environment: BTreeMap<String, String>,
+    region: &str,
+) -> Result<String, PayloadError> {
     if command.contains('\0') {
         return Err(PayloadError::InvalidNul { field: "command" });
     }
@@ -24,7 +35,14 @@ pub fn build_run_payload(
         return Err(PayloadError::InvalidNul { field: "arguments" });
     }
 
-    let environment = BTreeMap::from([("AWS_DEFAULT_REGION", region), ("AWS_REGION", region)]);
+    if environment
+        .iter()
+        .any(|(key, value)| key.is_empty() || key.contains(['=', '\0']) || value.contains('\0'))
+    {
+        return Err(PayloadError::InvalidEnvironment);
+    }
+    environment.insert("AWS_DEFAULT_REGION".into(), region.into());
+    environment.insert("AWS_REGION".into(), region.into());
     let payload = serde_json::to_string(&Payload {
         command,
         args,
@@ -44,5 +62,5 @@ pub fn build_run_payload(
 struct Payload<'a> {
     command: &'a str,
     args: &'a [String],
-    environment: BTreeMap<&'static str, &'a str>,
+    environment: BTreeMap<String, String>,
 }

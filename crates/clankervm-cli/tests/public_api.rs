@@ -36,6 +36,8 @@ fn run_requires_separator_before_the_command() {
         "run",
         "--execution-role-arn",
         "arn:aws:iam::123456789012:role/demo",
+        "--env",
+        "GREETING=hello",
         "--",
         "command",
         "--command-option",
@@ -45,6 +47,7 @@ fn run_requires_separator_before_the_command() {
         panic!("expected run command");
     };
     assert_eq!(run.command, ["command", "--command-option"]);
+    assert_eq!(run.config.environment.unwrap(), ["GREETING=hello"]);
 }
 
 #[test]
@@ -118,7 +121,6 @@ fn status_owns_waiting_and_removed_options_are_rejected() {
         vec!["clankervm", "push", "--poll-interval", "1s"],
         vec!["clankervm", "push", "--capability", "NOPE"],
         vec!["clankervm", "push", "--timeout", "eventually"],
-        vec!["clankervm", "run", "--env", "X=1", "--", "echo"],
         vec!["clankervm", "run", "--script", "run.sh", "--", "echo"],
     ] {
         assert!(Cli::try_parse_from(args).is_err());
@@ -333,6 +335,7 @@ fn run_uses_project_defaults_and_forwards_client_token() {
     assert!(request.contains("run-42"));
     assert!(request.contains("echo"));
     assert!(request.contains("hello"));
+    assert!(request.contains("GREETING"));
 }
 
 fn write_config(directory: &std::path::Path) {
@@ -347,6 +350,7 @@ artifact-bucket = "bucket"
 build-role-arn = "arn:aws:iam::123456789012:role/build"
 [run]
 command = ["echo", "hello"]
+environment = ["GREETING=hello"]
 execution-role-arn = "arn:aws:iam::123456789012:role/run"
 log-group = "/demo/runs"
 "#,
