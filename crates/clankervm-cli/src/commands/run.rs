@@ -19,13 +19,15 @@ pub struct RunArgs {
     pub client_token: Option<String>,
     #[command(flatten)]
     pub config: RunConfig,
-    #[arg(last = true, required = true, allow_hyphen_values = true)]
+    #[arg(last = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Args, Deserialize)]
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 pub struct RunConfig {
+    #[arg(skip)]
+    pub command: Option<Vec<String>>,
     #[arg(long)]
     pub execution_role_arn: Option<String>,
     #[arg(long)]
@@ -41,6 +43,7 @@ pub struct RunConfig {
 impl RunConfig {
     pub fn overlay(self, lower: &Self) -> Self {
         Self {
+            command: self.command.or_else(|| lower.command.clone()),
             execution_role_arn: self
                 .execution_role_arn
                 .or_else(|| lower.execution_role_arn.clone()),
@@ -53,6 +56,7 @@ impl RunConfig {
 
     fn resolve(self) -> Result<ResolvedRunConfig, ClankerError> {
         Ok(ResolvedRunConfig {
+            command: self.command,
             execution_role_arn: required_string(self.execution_role_arn, "run.execution-role-arn")?,
             ingress: non_empty_string(self.ingress, "run.ingress")?
                 .unwrap_or_else(|| DEFAULT_INGRESS.into()),
@@ -65,6 +69,7 @@ impl RunConfig {
 }
 
 struct ResolvedRunConfig {
+    command: Option<Vec<String>>,
     execution_role_arn: String,
     ingress: String,
     egress: String,
@@ -111,10 +116,21 @@ pub async fn run<T: MicroVmClient>(
     let image = config.resolve_image(args.release.as_deref())?;
     let region = &image.region;
     let run = args.config.overlay(&image.run).resolve()?;
-    let (command, command_args) = args
-        .command
-        .split_first()
-        .expect("clap requires a command after --");
+    let command = if args.command.is_empty() {
+        run.command.as_deref().unwrap_or_default()
+    } else {
+        &args.command
+    };
+    let (command, command_args) = command.split_first().ok_or_else(|| {
+        ClankerError::InvalidConfig(
+            "run command is required; pass it after `--` or set run.command".into(),
+        )
+    })?;
+    if command.trim().is_empty() {
+        return Err(ClankerError::InvalidConfig(
+            "run.command executable cannot be empty".into(),
+        ));
+    }
     let payload = build_run_payload(command, command_args, region)?;
     let account_role = image
         .push
@@ -207,8 +223,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_command_is_used_when_the_cli_command_is_omitted() {
+        let config = config(RunConfig {
+            command: Some(vec!["echo".into(), "from config".into()]),
+            execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
+            ..RunConfig::default()
+        });
+        let client = FakeMicroVmClient::default();
+
+        run(RunArgs::default(), &config, &client).await.unwrap();
+
+        let calls = client.calls();
+        let MicroVmCall::RunMicroVm(request) = &calls[0] else {
+            panic!("expected run call, got {calls:?}");
+        };
+        let payload: serde_json::Value = serde_json::from_str(&request.run_hook_payload).unwrap();
+        assert_eq!(payload["command"], "echo");
+        assert_eq!(payload["args"], serde_json::json!(["from config"]));
+    }
+
+    #[tokio::test]
     async fn flags_override_defaults_and_pin_the_release() {
         let config = config(RunConfig {
+            command: Some(vec!["configured-command".into()]),
             execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
             ..RunConfig::default()
         });
@@ -243,6 +280,8 @@ mod tests {
         );
         assert_eq!(request.maximum_duration_seconds, 60);
         assert_eq!(request.client_token.as_deref(), Some("run-42"));
+        let payload: serde_json::Value = serde_json::from_str(&request.run_hook_payload).unwrap();
+        assert_eq!(payload["command"], "echo");
     }
 
     #[test]
@@ -263,6 +302,23 @@ mod tests {
                 Err(ClankerError::InvalidConfig(_))
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn missing_command_is_rejected() {
+        let config = config(RunConfig {
+            execution_role_arn: Some("arn:aws:iam::123456789012:role/run".into()),
+            ..RunConfig::default()
+        });
+        let client = FakeMicroVmClient::default();
+
+        let error = run(RunArgs::default(), &config, &client).await.unwrap_err();
+
+        assert!(
+            error.to_string().contains("run command is required"),
+            "{error}"
+        );
+        assert!(client.calls().is_empty());
     }
 
     #[tokio::test]

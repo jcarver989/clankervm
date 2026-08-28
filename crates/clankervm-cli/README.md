@@ -47,6 +47,7 @@ timeout = "1h"
 timeout = "1h"
 
 [run]
+command = ["/usr/local/bin/my-job", "--job-id", "42"]
 execution-role-arn = "arn:aws:iam::123456789012:role/MicroVmExecutionRole"
 log-group = "/my-runner/microvms"
 max-duration = 3600
@@ -106,7 +107,7 @@ clankervm run -- /usr/local/bin/my-job --job-id 42
 clankervm run --release my-runner@42 --client-token "$RUN_ID" -- ./job
 ```
 
-Run flags mirror `[run]` keys, including `--max-duration` and `max-duration`. The explicit command and arguments share AWS's 4096-byte run-hook payload limit.
+Run flags mirror `[run]` keys, including `--max-duration` and `max-duration`. `run.command` provides a default executable and arguments; a command passed after `--` takes precedence. A command is required from one of those sources, and its payload shares AWS's 4096-byte run-hook limit.
 
 ## JSON output
 

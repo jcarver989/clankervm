@@ -87,6 +87,15 @@ fn validate_push(config: &PushConfig) -> Result<(), ClankerError> {
 }
 
 fn validate_run(config: &RunConfig) -> Result<(), ClankerError> {
+    if config.command.as_deref().is_some_and(|command| {
+        command
+            .first()
+            .is_none_or(|executable| executable.trim().is_empty())
+    }) {
+        return Err(ClankerError::InvalidConfig(
+            "run.command must contain a non-empty executable".into(),
+        ));
+    }
     validate_non_empty(
         config.execution_role_arn.as_deref(),
         "run.execution-role-arn",

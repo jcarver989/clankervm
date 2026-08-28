@@ -315,16 +315,7 @@ fn run_uses_project_defaults_and_forwards_client_token() {
     }]);
     let output = Command::new(env!("CARGO_BIN_EXE_clankervm"))
         .current_dir(directory.path())
-        .args([
-            "--format",
-            "json",
-            "run",
-            "--client-token",
-            "run-42",
-            "--",
-            "echo",
-            "hello",
-        ])
+        .args(["--format", "json", "run", "--client-token", "run-42"])
         .env("AWS_ACCESS_KEY_ID", "test")
         .env("AWS_SECRET_ACCESS_KEY", "test")
         .env("AWS_ENDPOINT_URL_LAMBDA_MICROVMS", fake.url())
@@ -341,6 +332,7 @@ fn run_uses_project_defaults_and_forwards_client_token() {
     let request = fake.finish().pop().unwrap();
     assert!(request.contains("run-42"));
     assert!(request.contains("echo"));
+    assert!(request.contains("hello"));
 }
 
 fn write_config(directory: &std::path::Path) {
@@ -354,6 +346,7 @@ region = "us-east-1"
 artifact-bucket = "bucket"
 build-role-arn = "arn:aws:iam::123456789012:role/build"
 [run]
+command = ["echo", "hello"]
 execution-role-arn = "arn:aws:iam::123456789012:role/run"
 log-group = "/demo/runs"
 "#,
