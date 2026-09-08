@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.0...clankervm-v0.1.1) - 2026-08-28
+
+### Other
+
+- Pass env vars to run
+- Support setting command in run toml config
+- Surface error messages
+- *(cli)* Support aws profiles
+
 ## [0.1.0](https://github.com/jcarver989/clankervm/releases/tag/clankervm-v0.1.0) - 2026-08-28
 
 ### Other
