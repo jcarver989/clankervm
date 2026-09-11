@@ -8,13 +8,45 @@ const MAX_PAYLOAD_BYTES: usize = 4096;
 pub(crate) fn build_run_payload(
     command: &str,
     args: &[String],
-    mut environment: BTreeMap<String, String>,
+    environment: BTreeMap<String, String>,
     region: &str,
 ) -> Result<String, ClankerError> {
-    if command.contains('\0') || args.iter().any(|argument| argument.contains('\0')) {
+    build_payload(command, args, environment, region, "run")
+}
+
+pub(crate) fn build_ready_payload(
+    command: &str,
+    args: &[String],
+    environment: BTreeMap<String, String>,
+    region: &str,
+) -> Result<String, ClankerError> {
+    if command.trim().is_empty() {
         return Err(ClankerError::InvalidConfig(
-            "run command and arguments must not contain NUL bytes".into(),
+            "microvm.image.hooks.ready.command executable cannot be empty".into(),
         ));
+    }
+    if environment
+        .iter()
+        .any(|(key, value)| key.contains('\0') || value.contains('\0'))
+    {
+        return Err(ClankerError::InvalidConfig(
+            "ready environment contains NUL bytes".into(),
+        ));
+    }
+    build_payload(command, args, environment, region, "ready")
+}
+
+fn build_payload(
+    command: &str,
+    args: &[String],
+    mut environment: BTreeMap<String, String>,
+    region: &str,
+    hook: &str,
+) -> Result<String, ClankerError> {
+    if command.contains('\0') || args.iter().any(|argument| argument.contains('\0')) {
+        return Err(ClankerError::InvalidConfig(format!(
+            "{hook} command and arguments must not contain NUL bytes"
+        )));
     }
     environment.insert("AWS_DEFAULT_REGION".into(), region.into());
     environment.insert("AWS_REGION".into(), region.into());
@@ -25,7 +57,7 @@ pub(crate) fn build_run_payload(
     })?;
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Err(ClankerError::InvalidConfig(format!(
-            "run hook payload is {} bytes; AWS allows at most {MAX_PAYLOAD_BYTES}",
+            "{hook} hook payload is {} bytes; AWS allows at most {MAX_PAYLOAD_BYTES}",
             payload.len()
         )));
     }

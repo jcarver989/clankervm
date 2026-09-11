@@ -23,6 +23,7 @@ pub(crate) struct ImageConfiguration {
     pub capabilities: Vec<Capability>,
     pub egress_network_connector: Arn,
     pub hooks: Hooks,
+    pub environment_variables: HashMap<String, String>,
 }
 
 /// Everything the client needs to publish one bundle as an image version.

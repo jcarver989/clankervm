@@ -352,6 +352,55 @@ fn push_waits_for_the_exact_version_to_become_active() {
 }
 
 #[test]
+fn push_sends_ready_initialization_on_create_update_and_removal() {
+    for (existing, configured) in [(false, true), (true, true), (true, false)] {
+        let directory = TempDir::new().unwrap();
+        let mut config = FULL_CONFIG.to_owned();
+        if configured {
+            config.push_str("\n[microvm.image.hooks.ready]\ncommand = ['echo', 'hello world']\nenvironment = ['WORKSPACE=/workspace/repo']\n");
+        }
+        write_config(directory.path(), &config);
+        fs::write(directory.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+        let image = if existing {
+            Response::ok(IMAGE_CREATED)
+        } else {
+            Response::not_found()
+        };
+        let fake = FakeAws::start(vec![
+            Response::ok("{}"),
+            image,
+            Response::ok(IMAGE_CREATING),
+            Response::ok(IMAGE_CREATED),
+            Response::ok(VERSION_ACTIVE),
+        ]);
+        run_json(
+            directory.path(),
+            &["--format", "json", "push", "--timeout", "5s"],
+            &fake.url(),
+        );
+        let requests = fake.finish();
+        let request = &requests[2];
+        let method = if existing { "PUT " } else { "POST " };
+        assert!(request.starts_with(method), "{request}");
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        if configured {
+            let payload: Value = serde_json::from_str(
+                body["environmentVariables"]["CLANKERVM_READY_HOOK_PAYLOAD"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(payload["command"], "echo");
+            assert_eq!(payload["args"], serde_json::json!(["hello world"]));
+            assert_eq!(payload["environment"]["WORKSPACE"], "/workspace/repo");
+            assert_eq!(payload["environment"]["AWS_REGION"], "us-east-1");
+        } else {
+            assert_eq!(body["environmentVariables"], serde_json::json!({}));
+        }
+    }
+}
+
+#[test]
 fn list_reports_every_page_and_formats_timestamps() {
     let directory = TempDir::new().unwrap();
     write_config(directory.path(), "");

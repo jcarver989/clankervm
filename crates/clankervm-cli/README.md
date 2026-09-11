@@ -54,6 +54,10 @@ ready-timeout = "5m"
 run-timeout = "1m"
 terminate-timeout = "30s"
 
+[microvm.image.hooks.ready]
+command = ["/usr/local/bin/prepare-workspace", "--repository", "owner/repo"]
+environment = ["WORKSPACE=/workspace/repo"]
+
 [microvm.image.versions]
 max = 10
 wait-timeout = "1h"
@@ -125,6 +129,38 @@ clankervm push \
   --tag team=platform \
   --tag imageName=my-runner
 ```
+
+### Initialize before snapshotting
+
+`microvm.image.hooks.ready` optionally runs a command once when `clankervm-server`
+starts during image creation. It uses the same command array and `KEY=VALUE`
+environment list as `microvm.run`; commands are executed directly, not through a
+shell. Use `["/bin/sh", "-c", "..."]` explicitly for shell syntax. Paths refer to
+files inside the image, and the command inherits the server's working directory,
+user, and environment. `AWS_REGION` and `AWS_DEFAULT_REGION` use the configured
+region, including any `--region` override.
+
+The server immediately returns HTTP 503 from `/ready` while initialization runs,
+then HTTP 200 only after the command exits successfully. A spawn or command failure
+stops the server with an error; polling does not retry the command. Runs are rejected
+until initialization succeeds. Shutdown cancels initialization and waits for its
+process group, using the same grace period as run commands.
+
+Use this to clone a repository and install dependencies before AWS captures disk
+and memory. The completed initialization is part of the snapshot and is not rerun
+when that snapshot is restored. Without this table, readiness is immediate as before.
+The existing `microvm.image.hooks.ready-timeout` (default `5m`, AWS range `1s`–`1h`)
+and `--ready-timeout-seconds` still control AWS's readiness deadline.
+
+This requires a server version supporting `CLANKERVM_READY_HOOK_PAYLOAD`; older
+servers ignore the setting and must be upgraded. Push sends the command as JSON in
+that image environment variable (maximum 4096 encoded bytes). Configuration changes
+are sent on both image creation and updates; removing the table clears the setting.
+Do not put secrets in this table: it is persisted in AWS image configuration and the
+snapshot. Fetch narrowly scoped build credentials when needed and ensure neither
+credentials nor per-run identity/state remain in disk or memory at readiness.
+Runtime secrets should be fetched after restore. Post-snapshot `/validate` commands
+are not implemented yet.
 
 ## Check release status
 
