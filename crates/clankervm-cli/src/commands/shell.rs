@@ -5,7 +5,6 @@ use crate::shell::{Event, Options, ShellError, attach, connect, events, is_inter
 use crate::{ClankerError, OutputFormat};
 use aws_sdk_lambdamicrovms::types::MicrovmState;
 use clap::Args;
-use std::io::Write;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
@@ -58,7 +57,7 @@ pub(super) async fn execute<T: MicroVmClient>(
     client: &T,
 ) -> Result<(), ClankerError> {
     let mut events = events();
-    let mut out = std::io::stdout().lock();
+    let mut out = tokio::io::stdout();
     let result = shell(
         options,
         config,
@@ -102,7 +101,7 @@ pub(crate) async fn shell<T, U, V>(
 where
     T: MicroVmClient,
     U: AsyncRead + AsyncWrite + Unpin,
-    V: Write,
+    V: AsyncWrite + Unpin,
 {
     if options.run.settings.ingress.is_some() {
         return Err(ClankerError::InvalidConfig(format!(

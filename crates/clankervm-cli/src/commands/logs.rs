@@ -1,14 +1,16 @@
-use crate::client::{LogEvent, LogPage, LogQuery, LogWindow, MicroVmClient, MicroVmClientError};
+use crate::client::{LogEvent, LogPage, LogQuery, LogWindow, MicroVmClient};
 use crate::config::{ProjectConfig, Settings};
 use crate::output::render;
 use crate::util::validate_non_empty;
 use crate::{ClankerError, OutputFormat};
 use aws_smithy_types::DateTime;
 use clap::Args;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::io::Write;
 use std::pin::pin;
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 /// The log group AWS streams MicroVM logs to by default.
@@ -17,15 +19,13 @@ const DEFAULT_GROUP_PREFIX: &str = "/aws/lambda-microvms";
 const DEFAULT_LIMIT: usize = 1000;
 /// Events one read may ask for.
 const MAX_LIMIT: usize = 10_000;
-/// How long one read may take when `--timeout` is not configured.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long `--follow` waits before asking for more events.
 const FOLLOW_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default, Args)]
 pub struct LogsOptions {
     /// MicroVM to read logs for, as reported by run or list.
-    #[arg(value_name = "MICROVM_ID")]
+    #[arg(value_name = "MICROVM_ID", value_parser = parse_microvm_id)]
     pub microvm_id: String,
     /// Keep printing new events until interrupted.
     #[arg(long)]
@@ -45,10 +45,6 @@ pub struct LogsSettings {
     #[arg(long)]
     #[serde(rename = "group")]
     pub log_group: Option<String>,
-    /// Log stream to read; defaults to the MicroVM id.
-    #[arg(long)]
-    #[serde(rename = "stream")]
-    pub log_stream: Option<String>,
     /// Read events from this long before now, for example 30m.
     #[arg(long, value_parser = humantime::parse_duration)]
     #[serde(with = "humantime_serde")]
@@ -56,16 +52,11 @@ pub struct LogsSettings {
     /// Events to report per read; defaults to 1000, at most 10000.
     #[arg(long)]
     pub limit: Option<usize>,
-    /// How long one read may take; defaults to 1m.
-    #[arg(long, value_parser = humantime::parse_duration)]
-    #[serde(with = "humantime_serde")]
-    pub timeout: Option<Duration>,
 }
 
 impl Settings for LogsSettings {
     fn validate(&self) -> Result<(), ClankerError> {
         validate_non_empty(self.log_group.as_deref(), "microvm.run.logs.group")?;
-        validate_non_empty(self.log_stream.as_deref(), "microvm.run.logs.stream")?;
         if self
             .limit
             .is_some_and(|limit| !(1..=MAX_LIMIT).contains(&limit))
@@ -86,19 +77,8 @@ impl LogsSettings {
             .unwrap_or_else(|| format!("{DEFAULT_GROUP_PREFIX}/{image}"))
     }
 
-    /// The stream to read, which AWS names after the MicroVM by default.
-    pub(crate) fn log_stream(&self, microvm_id: &str) -> String {
-        self.log_stream
-            .clone()
-            .unwrap_or_else(|| microvm_id.to_owned())
-    }
-
     pub(crate) fn limit(&self) -> usize {
         self.limit.unwrap_or(DEFAULT_LIMIT)
-    }
-
-    pub(crate) fn timeout(&self) -> Duration {
-        self.timeout.unwrap_or(DEFAULT_TIMEOUT)
     }
 
     /// The events one read reports: the newest in the stream, or every event
@@ -115,6 +95,47 @@ impl LogsSettings {
         self.since.map_or(LogWindow::Everything, |since| {
             LogWindow::Since(lookback(now, since))
         })
+    }
+}
+
+fn parse_microvm_id(value: &str) -> Result<String, String> {
+    static MICROVM_ID: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\Amicrovm-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z")
+            .expect("valid MicroVM ID regex")
+    });
+
+    if MICROVM_ID.is_match(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("expected a complete MicroVM ID (microvm-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), not a log stream name".into())
+    }
+}
+
+async fn resolve<T: MicroVmClient>(
+    client: &T,
+    settings: &LogsSettings,
+    group: String,
+    microvm_id: &str,
+) -> Result<Destination, ClankerError> {
+    let streams = client.log_streams(&group).await?;
+    let suffix = format!("]{microvm_id}");
+    let mut matches: Vec<String> = streams
+        .into_iter()
+        .filter(|stream| stream.ends_with(&suffix))
+        .collect();
+    matches.sort();
+    matches.dedup();
+    match matches.len() {
+        0 => Err(ClankerError::LogStreamNotFound {
+            group,
+            microvm_id: microvm_id.into(),
+        }),
+        1 => Ok(Destination::new(settings, group, matches.remove(0))),
+        _ => Err(ClankerError::AmbiguousLogStreams {
+            group,
+            microvm_id: microvm_id.into(),
+            streams: matches,
+        }),
     }
 }
 
@@ -135,16 +156,14 @@ struct Destination {
     group: String,
     stream: String,
     limit: usize,
-    timeout: Duration,
 }
 
 impl Destination {
-    fn new(settings: &LogsSettings, config: &ProjectConfig, microvm_id: &str) -> Self {
+    fn new(settings: &LogsSettings, group: String, stream: String) -> Self {
         Self {
-            group: settings.log_group(&config.name),
-            stream: settings.log_stream(microvm_id),
+            group,
+            stream,
             limit: settings.limit(),
-            timeout: settings.timeout(),
         }
     }
 }
@@ -163,7 +182,7 @@ pub(super) async fn execute<T: MicroVmClient>(
     format: OutputFormat,
     client: &T,
 ) -> Result<(), ClankerError> {
-    validate_non_empty(Some(&options.microvm_id), "MicroVM id")?;
+    parse_microvm_id(&options.microvm_id).map_err(ClankerError::InvalidConfig)?;
     if options.follow && matches!(format, OutputFormat::Json) {
         return Err(ClankerError::InvalidConfig(
             "--follow prints events as they arrive and cannot be combined with --format json"
@@ -171,8 +190,14 @@ pub(super) async fn execute<T: MicroVmClient>(
         ));
     }
     let settings = config.logs.merge(&options.settings)?;
-    let destination = Destination::new(&settings, config, &options.microvm_id);
     let now = now();
+    let destination = resolve(
+        client,
+        &settings,
+        settings.log_group(&config.name),
+        &options.microvm_id,
+    )
+    .await?;
 
     if options.follow {
         eprintln!(
@@ -266,31 +291,7 @@ async fn read<T: MicroVmClient>(
         limit: destination.limit,
         next_token,
     };
-    match tokio::time::timeout(destination.timeout, client.log_events(&query)).await {
-        Err(_) => Err(ClankerError::LogsTimeout {
-            timeout: destination.timeout,
-            group: destination.group.clone(),
-            stream: destination.stream.clone(),
-        }),
-        Ok(Ok(page)) => Ok(page),
-        Ok(Err(MicroVmClientError::NoLogStream { .. })) => {
-            Err(not_found(client, destination).await)
-        }
-        Ok(Err(error)) => Err(error.into()),
-    }
-}
-
-/// The streams the group does have, so a wrong stream name is obvious.
-async fn not_found<T: MicroVmClient>(client: &T, destination: &Destination) -> ClankerError {
-    let streams = client
-        .log_streams(&destination.group)
-        .await
-        .unwrap_or_default();
-    ClankerError::LogStreamNotFound {
-        group: destination.group.clone(),
-        stream: destination.stream.clone(),
-        streams,
-    }
+    Ok(client.log_events(&query).await?)
 }
 
 /// Writes events as terminal lines and flushes them.
@@ -349,6 +350,9 @@ mod tests {
     use crate::test_support::{LogEventBuilder, ROLE, project};
     use tempfile::TempDir;
 
+    const ID: &str = "microvm-f4e3b5a1-3a16-3f63-8470-251708859820";
+    const STREAM: &str = "2026/09/11[13.0]microvm-f4e3b5a1-3a16-3f63-8470-251708859820";
+
     /// A project whose `[microvm.run]` role resolves the account, like every command.
     fn config(sections: &str) -> (TempDir, ProjectConfig) {
         let directory = TempDir::new().unwrap();
@@ -368,7 +372,7 @@ mod tests {
 
     fn destination(options: &LogsOptions, config: &ProjectConfig) -> Destination {
         let settings = config.logs.merge(&options.settings).unwrap();
-        Destination::new(&settings, config, &options.microvm_id)
+        Destination::new(&settings, settings.log_group(&config.name), STREAM.into())
     }
 
     fn page(events: impl IntoIterator<Item = LogEvent>, next_token: Option<&str>) -> LogPage {
@@ -410,24 +414,32 @@ mod tests {
     #[tokio::test]
     async fn the_newest_events_are_read_from_the_run_group() {
         let (_directory, config) = config("[microvm.run.logs]\ngroup = \"/demo/runs\"\n");
-        let client = FakeMicroVmClient::default().log_events([Ok(page(
-            [
-                LogEventBuilder::new("first\n").at(10).build(),
-                LogEventBuilder::new("second\n").at(20).build(),
-            ],
-            None,
-        ))]);
-        let options = options("microvm-7");
-
-        let events = snapshot(&client, &destination(&options, &config), LogWindow::Newest)
+        let client = FakeMicroVmClient::default()
+            .log_streams([Ok(vec!["unrelated-stream".into(), STREAM.into()])])
+            .log_events([Ok(page(
+                [
+                    LogEventBuilder::new("first\n").at(10).build(),
+                    LogEventBuilder::new("second\n").at(20).build(),
+                ],
+                None,
+            ))]);
+        let destination = resolve(
+            &client,
+            &config.logs,
+            config.logs.log_group(&config.name),
+            ID,
+        )
+        .await
+        .unwrap();
+        let events = snapshot(&client, &destination, LogWindow::Newest)
             .await
             .unwrap();
 
         assert_eq!(messages(&events), ["first\n", "second\n"]);
-        let queries = read_queries(&client.calls());
+        let queries = read_queries(&client.calls()[1..]);
         assert_eq!(queries.len(), 1);
         assert_eq!(queries[0].group, "/demo/runs");
-        assert_eq!(queries[0].stream, "microvm-7");
+        assert_eq!(queries[0].stream, STREAM);
         assert_eq!(queries[0].window, LogWindow::Newest);
         assert_eq!(queries[0].limit, DEFAULT_LIMIT);
         assert_eq!(queries[0].next_token, None);
@@ -437,7 +449,7 @@ mod tests {
     async fn without_configuration_aws_defaults_are_used() {
         let (_directory, config) = config("");
         let client = FakeMicroVmClient::default();
-        let options = options("microvm-7");
+        let options = options(ID);
 
         snapshot(&client, &destination(&options, &config), LogWindow::Newest)
             .await
@@ -445,16 +457,16 @@ mod tests {
 
         let queries = read_queries(&client.calls());
         assert_eq!(queries[0].group, "/aws/lambda-microvms/demo");
-        assert_eq!(queries[0].stream, "microvm-7");
+        assert_eq!(queries[0].stream, STREAM);
     }
 
     #[tokio::test]
     async fn flags_override_the_shared_run_logs_table() {
         let (_directory, config) =
-            config("[microvm.run.logs]\ngroup = \"/demo/other\"\nstream = \"stack\"\nlimit = 5\n");
+            config("[microvm.run.logs]\ngroup = \"/demo/other\"\nlimit = 5\n");
         let client = FakeMicroVmClient::default();
 
-        let configured = options("microvm-7");
+        let configured = options(ID);
         snapshot(
             &client,
             &destination(&configured, &config),
@@ -463,19 +475,18 @@ mod tests {
         .await
         .unwrap();
 
-        let mut flagged = options("microvm-7");
+        let mut flagged = options(ID);
         flagged.settings.log_group = Some("/demo/cli".into());
-        flagged.settings.log_stream = Some("custom".into());
         snapshot(&client, &destination(&flagged, &config), LogWindow::Newest)
             .await
             .unwrap();
 
         let queries = read_queries(&client.calls());
         assert_eq!(queries[0].group, "/demo/other");
-        assert_eq!(queries[0].stream, "stack");
+        assert_eq!(queries[0].stream, STREAM);
         assert_eq!(queries[0].limit, 5);
         assert_eq!(queries[1].group, "/demo/cli");
-        assert_eq!(queries[1].stream, "custom");
+        assert_eq!(queries[1].stream, STREAM);
     }
 
     #[tokio::test]
@@ -497,7 +508,7 @@ mod tests {
                 Some("token-2"),
             )),
         ]);
-        let mut options = options("microvm-7");
+        let mut options = options(ID);
         options.settings.since = Some(Duration::from_secs(600));
         options.settings.limit = Some(3);
         let settings = config.logs.merge(&options.settings).unwrap();
@@ -528,7 +539,7 @@ mod tests {
             [LogEventBuilder::new("only").build()],
             Some("token-1"),
         ))]);
-        let options = options("microvm-7");
+        let options = options(ID);
 
         snapshot(&client, &destination(&options, &config), LogWindow::Newest)
             .await
@@ -544,7 +555,7 @@ mod tests {
             Ok(page([LogEventBuilder::new("a").build()], Some("token-1"))),
             Ok(page([], Some("token-1"))),
         ]);
-        let options = options("microvm-7");
+        let options = options(ID);
 
         let events = snapshot(
             &client,
@@ -556,78 +567,6 @@ mod tests {
 
         assert_eq!(messages(&events), ["a"]);
         assert_eq!(read_queries(&client.calls()).len(), 2);
-    }
-
-    #[tokio::test]
-    async fn a_missing_stream_names_the_streams_the_group_has() {
-        let (_directory, config) = config("[microvm.run.logs]\ngroup = \"/demo/runs\"\n");
-        let client = FakeMicroVmClient::default()
-            .log_events([Err(MicroVmClientError::NoLogStream {
-                group: "/demo/runs".into(),
-                stream: "microvm-7".into(),
-            })])
-            .log_streams([Ok(vec!["job-1".into(), "job-2".into()])]);
-        let options = options("microvm-7");
-
-        let error = snapshot(&client, &destination(&options, &config), LogWindow::Newest)
-            .await
-            .unwrap_err();
-
-        let message = error.to_string();
-        assert!(
-            message.contains("no log stream `microvm-7` in log group `/demo/runs`"),
-            "{message}"
-        );
-        assert!(message.contains("the group has: job-1, job-2"), "{message}");
-        assert!(message.contains("--log-stream"), "{message}");
-    }
-
-    #[test]
-    fn only_the_first_streams_a_group_has_are_named() {
-        let streams = (1..=9).map(|index| format!("job-{index}")).collect();
-
-        let message = ClankerError::LogStreamNotFound {
-            group: "/demo/runs".into(),
-            stream: "microvm-7".into(),
-            streams,
-        }
-        .to_string();
-
-        assert!(
-            message.contains("the group has: job-1, job-2, job-3, job-4, job-5"),
-            "{message}"
-        );
-        assert!(!message.contains("job-6"), "{message}");
-    }
-
-    #[test]
-    fn a_missing_group_is_reported_without_streams() {
-        let message = ClankerError::LogStreamNotFound {
-            group: "/demo/runs".into(),
-            stream: "microvm-7".into(),
-            streams: Vec::new(),
-        }
-        .to_string();
-
-        assert!(
-            message.starts_with("no log stream `microvm-7` in log group `/demo/runs`;"),
-            "{message}"
-        );
-        assert!(!message.contains("the group has"), "{message}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_read_that_takes_too_long_is_reported() {
-        let (_directory, config) = config("");
-        let client = FakeMicroVmClient::default().with_delay(Duration::from_secs(10));
-        let mut options = options("microvm-7");
-        options.settings.timeout = Some(Duration::from_secs(1));
-
-        let error = snapshot(&client, &destination(&options, &config), LogWindow::Newest)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, ClankerError::LogsTimeout { .. }), "{error}");
     }
 
     #[tokio::test]
@@ -647,7 +586,7 @@ mod tests {
             )),
             Ok(page([], Some("token-2"))),
         ]);
-        let destination = destination(&options("microvm-7"), &config);
+        let destination = destination(&options(ID), &config);
         let mut out = Vec::new();
         let watched = client.clone();
         let stop = async move {
@@ -685,7 +624,7 @@ mod tests {
             [LogEventBuilder::new("hello").at(10).build()],
             None,
         ))]);
-        let destination = destination(&options("microvm-7"), &config);
+        let destination = destination(&options(ID), &config);
         let mut out = Vec::new();
 
         follow(
@@ -706,7 +645,7 @@ mod tests {
     async fn follow_human_output_is_not_offered_as_json() {
         let (_directory, config) = config("");
         let client = FakeMicroVmClient::default();
-        let mut options = options("microvm-7");
+        let mut options = options(ID);
         options.follow = true;
 
         let error = execute(&options, &config, OutputFormat::Json, &client)
@@ -738,7 +677,7 @@ mod tests {
     #[test]
     fn unsupported_read_sizes_are_rejected() {
         let (_directory, config) = config("");
-        let mut options = options("microvm-7");
+        let mut options = options(ID);
         options.settings.limit = Some(0);
 
         let error = config.logs.merge(&options.settings).unwrap_err();
@@ -755,7 +694,7 @@ mod tests {
     async fn an_empty_stream_is_reported_as_such() {
         let (_directory, config) = config("[microvm.run.logs]\ngroup = \"/demo/runs\"\n");
         let client = FakeMicroVmClient::default();
-        let options = options("microvm-7");
+        let options = options(ID);
         let destination = destination(&options, &config);
 
         let result = LogsResult {
@@ -768,11 +707,11 @@ mod tests {
 
         assert_eq!(
             human(&result, true),
-            "No log events in `microvm-7` of `/demo/runs`."
+            format!("No log events in `{STREAM}` of `/demo/runs`.")
         );
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["logGroup"], "/demo/runs");
-        assert_eq!(json["logStream"], "microvm-7");
+        assert_eq!(json["logStream"], STREAM);
         assert_eq!(json["events"], serde_json::json!([]));
     }
 
@@ -784,10 +723,10 @@ mod tests {
 
         let result = LogsResult {
             log_group: config.logs.log_group(&config.name),
-            log_stream: config.logs.log_stream("microvm-7"),
+            log_stream: STREAM.into(),
             events: snapshot(
                 &client,
-                &destination(&options("microvm-7"), &config),
+                &destination(&options(ID), &config),
                 LogWindow::Newest,
             )
             .await
@@ -795,10 +734,10 @@ mod tests {
         };
 
         assert_eq!(result.log_group, "/aws/lambda-microvms/demo");
-        assert_eq!(result.log_stream, "microvm-7");
+        assert_eq!(result.log_stream, STREAM);
         assert_eq!(
             human(&result, true),
-            "No log events in `microvm-7` of `/aws/lambda-microvms/demo`."
+            format!("No log events in `{STREAM}` of `/aws/lambda-microvms/demo`.")
         );
     }
 
@@ -806,7 +745,7 @@ mod tests {
     fn events_are_rendered_with_their_timestamps_unless_raw() {
         let result = LogsResult {
             log_group: "/demo/runs".into(),
-            log_stream: "microvm-7".into(),
+            log_stream: STREAM.into(),
             events: vec![
                 LogEventBuilder::new("hello").at(0).build(),
                 LogEventBuilder::new("again\n").at(61).build(),

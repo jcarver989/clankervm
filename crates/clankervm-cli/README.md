@@ -79,17 +79,15 @@ egress = "INTERNET_EGRESS"
 
 [microvm.run.logs]
 group = "/my-runner/microvms"
-stream = "..."
 since = "30m"
 limit = 1000
-timeout = "1m"
 ```
 
 Only `aws.region` and `microvm.name` are required to load a project. Image and
 run tables are optional; each command checks its required settings (for example,
 push needs an artifact bucket and image IAM role). Unknown fields are rejected.
 
-Command-line settings override TOML settings; existing flag names are unchanged.
+Command-line settings override TOML settings.
 For example, `--artifact-bucket` overrides `microvm.image.artifact.s3-bucket`,
 `--build-role-arn` overrides `microvm.image.iam-role`, and `--execution-role-arn`
 overrides `microvm.run.iam-role`. Lists supplied on the command line replace
@@ -103,9 +101,9 @@ it disables pruning. `wait-timeout` applies to both push and `status --wait`
 (default `1h`), and each command's `--timeout` overrides it.
 
 `microvm.run.logs.group` sets both the launch log destination and the group read
-by `logs`. If omitted, logs uses `/aws/lambda-microvms/<name>`. `stream` defaults
-to the MicroVM ID and only affects log reads, as do `since`, `limit`, and `timeout`.
-`max-duration` is in seconds; log `since` and `timeout` use duration strings.
+by `logs`. If omitted, logs uses `/aws/lambda-microvms/<name>`. The stream is
+discovered automatically from the MicroVM ID. `since` and `limit` only affect
+log reads. `max-duration` is in seconds; log `since` uses a duration string.
 
 Use one configuration file per image:
 
@@ -260,16 +258,19 @@ connector and is terminated when the session ends unless `--keep` is set.
 ## Read logs
 
 ```sh
-clankervm logs microvm-0099
-clankervm logs microvm-0099 --follow
-clankervm logs microvm-0099 --since 30m --limit 500
-clankervm logs microvm-0099 --raw
-clankervm logs microvm-0099 \
-  --log-group /my-runner/microvms \
-  --log-stream custom
+clankervm logs microvm-f4e3b5a1-3a16-3f63-8470-251708859820
+clankervm logs microvm-f4e3b5a1-3a16-3f63-8470-251708859820 --follow
+clankervm logs microvm-f4e3b5a1-3a16-3f63-8470-251708859820 --since 30m --limit 500
+clankervm logs microvm-f4e3b5a1-3a16-3f63-8470-251708859820 --raw
+clankervm logs microvm-f4e3b5a1-3a16-3f63-8470-251708859820 \
+  --log-group /my-runner/microvms
 ```
 
-`--follow` prints until Ctrl-C and cannot be combined with `--format json`.
+Pass the complete `microvm-<UUID>` ID returned by `run` or `list`, not a log
+stream name. 
+
+`--follow` prints new events until Ctrl-C and cannot be combined with
+`--format json`.  
 
 ## JSON output
 
@@ -278,7 +279,7 @@ Use the global option for machine-readable output:
 ```sh
 clankervm --format json status
 clankervm --format json list
-clankervm --format json logs microvm-0099
+clankervm --format json logs microvm-f4e3b5a1-3a16-3f63-8470-251708859820
 ```
 
 Progress messages go to stderr. Run `clankervm COMMAND --help` for the complete

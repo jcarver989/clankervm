@@ -683,10 +683,8 @@ iam-role = "arn:aws:iam::123456789012:role/run"
         assert_eq!(config.run.egress.as_deref(), Some("INTERNET_EGRESS"));
         assert_eq!(config.run.log_group.as_deref(), Some("/my-runner/microvms"));
         assert_eq!(config.logs.log_group, config.run.log_group);
-        assert_eq!(config.logs.log_stream.as_deref(), Some("..."));
         assert_eq!(config.logs.since, Some(Duration::from_mins(30)));
         assert_eq!(config.logs.limit, Some(1000));
-        assert_eq!(config.logs.timeout, Some(Duration::from_secs(60)));
     }
 
     #[test]
@@ -700,6 +698,8 @@ iam-role = "arn:aws:iam::123456789012:role/run"
             "[microvm.image.versions]\nkeep-versions = 10",
             "[microvm.run.network]\nunknown = true",
             "[microvm.run.logs]\nlog-group = '/logs'",
+            "[microvm.run.logs]\nstream = 'custom'",
+            "[microvm.run.logs]\ntimeout = '1m'",
         ] {
             let text = format!("[aws]\nregion = 'us-east-1'\n[microvm]\nname = 'demo'\n{section}");
             assert!(

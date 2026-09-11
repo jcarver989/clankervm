@@ -26,7 +26,7 @@ use std::future::Future;
 const LIST_PAGE_SIZE: i32 = 50;
 /// How long a shell token stays valid; it only has to outlive the handshake.
 const SHELL_TOKEN_MINUTES: i32 = 5;
-/// Log streams requested per page; a page is all the `logs` hint needs.
+/// Log streams requested per discovery page.
 const STREAMS_PAGE_SIZE: i32 = 50;
 /// Events one read may ask for.
 const EVENTS_PAGE_SIZE: usize = 10_000;
@@ -327,19 +327,31 @@ impl MicroVmClient for AwsMicroVmClient {
     }
 
     async fn log_streams(&self, group: &str) -> Result<Vec<String>, MicroVmClientError> {
-        let page = self
-            .logs
-            .describe_log_streams()
-            .log_group_name(group)
-            .limit(STREAMS_PAGE_SIZE)
-            .send()
-            .await
-            .map_err(|error| MicroVmClientError::service("describe log streams", &error))?;
-        Ok(page
-            .log_streams()
-            .iter()
-            .filter_map(|stream| stream.log_stream_name().map(str::to_owned))
-            .collect())
+        let mut streams = Vec::new();
+        let mut next_token = None;
+        loop {
+            let page = self
+                .logs
+                .describe_log_streams()
+                .log_group_name(group)
+                .limit(STREAMS_PAGE_SIZE)
+                .set_next_token(next_token)
+                .send()
+                .await
+                .map_err(|error| MicroVmClientError::service("describe log streams", &error))?;
+
+            streams.extend(
+                page.log_streams()
+                    .iter()
+                    .filter_map(|stream| stream.log_stream_name().map(str::to_owned)),
+            );
+
+            next_token = page.next_token().map(str::to_owned);
+
+            if next_token.is_none() {
+                return Ok(streams);
+            }
+        }
     }
 
     async fn log_events(&self, query: &LogQuery) -> Result<LogPage, MicroVmClientError> {
