@@ -128,6 +128,7 @@ mod tests {
     use super::*;
     use crate::client::{FakeMicroVmClient, MicroVmClientError};
     use crate::test_support::{active, failed, pending};
+    use aws_sdk_lambdamicrovms::types::MicrovmImageVersionStatus;
 
     fn release() -> Release {
         Release::new("demo", arn(), "2")
@@ -142,7 +143,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.observation.version_status, "ACTIVE");
+        assert_eq!(
+            result.observation.version_status,
+            MicrovmImageVersionStatus::Active
+        );
         assert_eq!(client.calls().len(), 2);
     }
 

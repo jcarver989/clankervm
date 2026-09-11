@@ -25,6 +25,14 @@ impl Response {
             body: r#"{"__type":"ResourceNotFoundException"}"#,
         }
     }
+
+    /// A refusal that carries the error code and message AWS reports.
+    pub fn access_denied() -> Self {
+        Self {
+            status: 403,
+            body: r#"{"__type":"AccessDeniedException","message":"not allowed to list MicroVMs"}"#,
+        }
+    }
 }
 
 /// A local AWS endpoint that answers scripted responses and records requests.
@@ -93,10 +101,22 @@ impl FakeAws {
     }
 }
 
+/// A listing page with one running MicroVM and a token for the page after it.
+pub const MICROVMS_PAGE_RUNNING: &str = r#"{"items":[{"microvmId":"microvm-1","state":"RUNNING","imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"7","startedAt":1787616000}],"nextToken":"page-2"}"#;
+/// The page after [`MICROVMS_PAGE_RUNNING`], ending the listing.
+pub const MICROVMS_PAGE_TERMINATED: &str = r#"{"items":[{"microvmId":"microvm-2","state":"TERMINATED","imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"7","startedAt":1787529600}]}"#;
+/// A listing page with no MicroVMs.
+pub const MICROVMS_NONE: &str = r#"{"items":[]}"#;
+
 /// An image as `GetMicrovmImage` reports it.
 pub const IMAGE_CREATED: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","name":"demo","state":"CREATED","latestActiveImageVersion":"2","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role","imageVersion":"2"}"#;
 /// The same image while its build is still running.
 pub const IMAGE_CREATING: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","name":"demo","state":"CREATING","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role","imageVersion":"2"}"#;
+
+/// A page of image versions holding the release just activated and an older one.
+pub const VERSIONS_PAGE_ACTIVE: &str = r#"{"items":[{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"2","state":"SUCCESSFUL","status":"ACTIVE","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role"},{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"1","state":"SUCCESSFUL","status":"INACTIVE","createdAt":1787529600,"baseImageArn":"base","buildRoleArn":"role"}],"nextToken":"versions-2"}"#;
+/// The page after [`VERSIONS_PAGE_ACTIVE`], holding a version AWS is already deleting.
+pub const VERSIONS_PAGE_DELETED: &str = r#"{"items":[{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"0","state":"DELETED","status":"INACTIVE","createdAt":1787443200,"baseImageArn":"base","buildRoleArn":"role"}]}"#;
 
 /// An image version that AWS reports as active.
 pub const VERSION_ACTIVE: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"2","state":"SUCCESSFUL","status":"ACTIVE","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role"}"#;

@@ -1,8 +1,9 @@
 use crate::ClankerError;
 use crate::arn::Arn;
-use crate::client::{ImageConfiguration, ImageHooks, ImageSpec};
+use crate::client::{ImageConfiguration, ImageSpec};
 use crate::commands::{PushSettings, RunSettings, StatusSettings};
 use crate::util::{parse_release, validate_non_empty};
+use aws_sdk_lambdamicrovms::types::{HookState, Hooks, MicrovmHooks, MicrovmImageHooks, Resources};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -122,15 +123,10 @@ impl ProjectConfig {
                 base_image_arn: Arn::lambda(region, "aws", "microvm-image", settings.base_image())?,
                 build_role_arn: role,
                 description: format!("Bundle {bundle_digest}"),
-                minimum_memory_mib: settings.minimum_memory_mib,
+                resources: image_resources(settings)?,
                 capabilities: settings.capabilities()?,
                 egress_network_connector: Arn::network_connector(region, settings.egress())?,
-                hooks: ImageHooks {
-                    port: settings.port(),
-                    ready_timeout_seconds: settings.ready_timeout_seconds(),
-                    run_timeout_seconds: settings.run_timeout_seconds(),
-                    terminate_timeout_seconds: settings.terminate_timeout_seconds(),
-                },
+                hooks: image_hooks(settings),
             },
         })
     }
@@ -148,6 +144,39 @@ impl ProjectConfig {
         }
         Ok(Some(version.to_owned()))
     }
+}
+
+/// The hook configuration AWS accepts on both create and update.
+fn image_hooks(settings: &PushSettings) -> Hooks {
+    Hooks::builder()
+        .port(settings.port())
+        .microvm_image_hooks(
+            MicrovmImageHooks::builder()
+                .ready(HookState::Enabled)
+                .ready_timeout_in_seconds(settings.ready_timeout_seconds())
+                .build(),
+        )
+        .microvm_hooks(
+            MicrovmHooks::builder()
+                .run(HookState::Enabled)
+                .run_timeout_in_seconds(settings.run_timeout_seconds())
+                .terminate(HookState::Enabled)
+                .terminate_timeout_in_seconds(settings.terminate_timeout_seconds())
+                .build(),
+        )
+        .build()
+}
+
+/// The memory request AWS accepts on both create and update.
+fn image_resources(settings: &PushSettings) -> Result<Option<Vec<Resources>>, ClankerError> {
+    settings
+        .minimum_memory_mib
+        .map(|memory| Resources::builder().minimum_memory_in_mib(memory).build())
+        .transpose()
+        .map(|resources| resources.map(|resources| vec![resources]))
+        .map_err(|error| {
+            ClankerError::InvalidConfig(format!("invalid push.minimum-memory-mib: {error}"))
+        })
 }
 
 pub(crate) trait Settings: Serialize + DeserializeOwned {

@@ -1,18 +1,25 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    ImageSpec, Launch, LaunchSpec, MicroVmClient, Observation, Published, artifact_key,
+    ImageIdentifier, ImageSpec, Launch, LaunchSpec, MicroVmClient, MicroVmPage, Observation,
+    Published, artifact_key,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 /// One call recorded by [`FakeMicroVmClient`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Call {
-    Publish(ImageSpec),
+    Publish(Box<ImageSpec>),
     Observe(Arn, Option<String>),
     Prune(Arn, usize),
+    ListMicroVms {
+        image: Option<ImageIdentifier>,
+        version: Option<String>,
+        next_token: Option<String>,
+    },
     Launch(LaunchSpec),
 }
 
@@ -28,7 +35,9 @@ struct State {
     published: VecDeque<Result<Published, MicroVmClientError>>,
     observed: VecDeque<Result<Option<Observation>, MicroVmClientError>>,
     pruned: VecDeque<Result<(), MicroVmClientError>>,
+    listed: VecDeque<Result<MicroVmPage, MicroVmClientError>>,
     launched: VecDeque<Result<Launch, MicroVmClientError>>,
+    delay: Option<Duration>,
     calls: Vec<Call>,
 }
 
@@ -57,6 +66,14 @@ impl FakeMicroVmClient {
         self
     }
 
+    pub(crate) fn listed(
+        self,
+        responses: impl IntoIterator<Item = Result<MicroVmPage, MicroVmClientError>>,
+    ) -> Self {
+        self.lock().listed = responses.into_iter().collect();
+        self
+    }
+
     pub(crate) fn launched(
         self,
         responses: impl IntoIterator<Item = Result<Launch, MicroVmClientError>>,
@@ -65,19 +82,32 @@ impl FakeMicroVmClient {
         self
     }
 
+    /// Makes every call take `delay` to answer, so deadlines can be tested.
+    pub(crate) fn with_delay(self, delay: Duration) -> Self {
+        self.lock().delay = Some(delay);
+        self
+    }
+
     pub(crate) fn calls(&self) -> Vec<Call> {
         self.lock().calls.clone()
     }
 
-    fn answer<T>(
+    async fn answer<T>(
         &self,
         call: Call,
         scripted: impl FnOnce(&mut State) -> Option<T>,
         default: impl FnOnce() -> T,
     ) -> T {
-        let mut state = self.lock();
-        state.calls.push(call);
-        scripted(&mut state).unwrap_or_else(default)
+        let (answer, delay) = {
+            let mut state = self.lock();
+            state.calls.push(call);
+            let delay = state.delay;
+            (scripted(&mut state).unwrap_or_else(default), delay)
+        };
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        answer
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -85,8 +115,6 @@ impl FakeMicroVmClient {
     }
 }
 
-// The trait is async; the fake resolves immediately without awaiting.
-#[allow(clippy::unused_async_trait_impl)]
 impl MicroVmClient for FakeMicroVmClient {
     async fn publish(
         &self,
@@ -94,7 +122,7 @@ impl MicroVmClient for FakeMicroVmClient {
         bundle: &Artifact,
     ) -> Result<Published, MicroVmClientError> {
         self.answer(
-            Call::Publish(spec.clone()),
+            Call::Publish(Box::new(spec.clone())),
             |state| state.published.pop_front(),
             || {
                 Ok(Published {
@@ -107,6 +135,7 @@ impl MicroVmClient for FakeMicroVmClient {
                 })
             },
         )
+        .await
     }
 
     async fn observe(
@@ -119,6 +148,7 @@ impl MicroVmClient for FakeMicroVmClient {
             |state| state.observed.pop_front(),
             || Ok(None),
         )
+        .await
     }
 
     async fn prune(&self, image: &Arn, keep: usize) -> Result<(), MicroVmClientError> {
@@ -127,6 +157,25 @@ impl MicroVmClient for FakeMicroVmClient {
             |state| state.pruned.pop_front(),
             || Ok(()),
         )
+        .await
+    }
+
+    async fn list_microvms(
+        &self,
+        image: Option<&ImageIdentifier>,
+        version: Option<&str>,
+        next_token: Option<&str>,
+    ) -> Result<MicroVmPage, MicroVmClientError> {
+        self.answer(
+            Call::ListMicroVms {
+                image: image.cloned(),
+                version: version.map(str::to_owned),
+                next_token: next_token.map(str::to_owned),
+            },
+            |state| state.listed.pop_front(),
+            || Ok((Vec::new(), None)),
+        )
+        .await
     }
 
     async fn launch(&self, spec: &LaunchSpec) -> Result<Launch, MicroVmClientError> {
@@ -140,5 +189,6 @@ impl MicroVmClient for FakeMicroVmClient {
                 })
             },
         )
+        .await
     }
 }

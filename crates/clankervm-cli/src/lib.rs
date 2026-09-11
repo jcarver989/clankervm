@@ -78,6 +78,8 @@ pub enum ClankerError {
         "timed out after {timeout:?} waiting for {release}\nResume with: clankervm status --wait {release}"
     )]
     WaitTimeout { release: String, timeout: Duration },
+    #[error("timed out after {timeout:?} listing MicroVMs; raise --timeout or narrow the filters")]
+    ListTimeout { timeout: Duration },
     #[error("project file already exists: {0}; pass --force to replace it")]
     AlreadyInitialized(PathBuf),
     #[error("failed to serialize output: {0}")]

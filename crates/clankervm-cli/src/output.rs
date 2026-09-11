@@ -36,7 +36,9 @@ impl ReleaseProgress {
         }
         eprintln!(
             "  Image: {:<10} Build: {:<10} Activation: {}",
-            observed.image_state, observed.version_state, observed.version_status
+            observed.image_state_name(),
+            observed.version_state,
+            observed.version_status
         );
         self.prior = Some(observed.clone());
     }

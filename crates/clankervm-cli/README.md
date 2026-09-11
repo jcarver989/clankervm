@@ -100,6 +100,33 @@ clankervm status --wait --timeout 10m my-runner@42
 
 `status --wait` uses `--timeout` over `[status].timeout`; it never uses the push timeout.
 
+## List
+
+`list` reports the MicroVMs visible in the configured account and region so you can find an id before inspecting or terminating it. It never launches or terminates anything, and it needs neither the push nor the run role: `lambda:ListMicrovms` on the selected credentials is enough.
+
+```sh
+clankervm list
+clankervm list --image my-runner --image-version 42
+clankervm list --state RUNNING --state PENDING
+clankervm --format json list --all
+```
+
+Terminated MicroVMs are hidden by default. `--all` includes them, while repeatable `--state` filters replace that default entirely, so `--state TERMINATED` works on its own; the two options are mutually exclusive. States are matched case-insensitively against AWS's values (`PENDING`, `RUNNING`, `SUSPENDED`, `SUSPENDING`, `TERMINATING`, `TERMINATED`); unsupported filters are rejected. `--image` accepts a name or an ARN, and `--image-version` requires it. An explicit ARN must belong to the configured region.
+
+Every page AWS returns is read within `--timeout` (default `1m`), including empty pages that still carry a next token. Results are deduplicated by id and sorted newest first, and a failure on any later page fails the command instead of printing a partial listing. There are no per-MicroVM detail calls, so a listing is a best-effort snapshot rather than an ownership inventory.
+
+Human output names the region and the credential scope:
+
+```text
+Region:  us-west-2
+Profile: Production-PowerUser
+
+VM ID         STATE    IMAGE                                                       VERSION  STARTED
+microvm-0099  RUNNING  arn:aws:lambda:us-west-2:123456789012:microvm-image:my-runner 42       2026-08-25T00:00:00Z
+```
+
+JSON output is `{"microvms":[{"microvmId":...,"state":...,"imageArn":...,"imageVersion":...,"startedAt":...}]}` with RFC3339 UTC timestamps and an empty array when nothing matches.
+
 ## Run
 
 ```sh

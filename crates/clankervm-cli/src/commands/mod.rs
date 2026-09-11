@@ -1,4 +1,5 @@
 mod init;
+mod list;
 mod push;
 mod run;
 mod status;
@@ -9,6 +10,7 @@ use crate::{ClankerError, Cli};
 use aws_config::{BehaviorVersion, Region};
 use clap::Subcommand;
 use init::InitArgs;
+pub use list::ListOptions;
 pub use push::PushOptions;
 pub(crate) use push::PushSettings;
 pub use run::RunOptions;
@@ -24,6 +26,8 @@ pub enum Command {
     Push(PushOptions),
     /// Inspect a release, optionally waiting for it to become active.
     Status(StatusOptions),
+    /// List MicroVMs in the account.
+    List(ListOptions),
     /// Start a command in a MicroVM.
     Run(RunOptions),
 }
@@ -47,6 +51,7 @@ pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
     match &cli.command {
         Command::Push(options) => push::execute(options, &config, cli.format, &client).await,
         Command::Status(options) => status::execute(options, &config, cli.format, &client).await,
+        Command::List(options) => list::execute(options, &config, cli.format, &client).await,
         Command::Run(options) => run::execute(options, &config, cli.format, &client).await,
         Command::Init(_) => unreachable!("init returns before project setup"),
     }

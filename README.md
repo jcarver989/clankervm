@@ -45,9 +45,17 @@ Each configuration file describes one image; repositories with multiple images s
 
 `status` performs a one-shot inspection; `status --wait NAME@VERSION` waits for an exact release to become active.
 
+`list` reports the MicroVMs in the selected account and region, with optional image, version, and state filters. Terminated MicroVMs are hidden unless `--all` is passed.
+
+```sh
+clankervm list
+clankervm list --image my-runner --state RUNNING
+clankervm --format json list --all
+```
+
 `run` launches the configured image with an explicit command and arguments. The run-hook payload is limited to 4096 bytes.
 
-See [`crates/clankervm-cli/README.md`](crates/clankervm-cli/README.md) for project configuration, prepared source contexts, release monitoring, JSON output, and run options.
+See [`crates/clankervm-cli/README.md`](crates/clankervm-cli/README.md) for project configuration, prepared source contexts, release monitoring, MicroVM discovery, JSON output, and run options.
 
 ClankerVM is under active development. The AWS Lambda MicroVM service and its API may change.
 

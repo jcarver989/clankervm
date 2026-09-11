@@ -52,7 +52,7 @@ pub(super) async fn execute<T: MicroVmClient>(
             "Image name:  {}\nRelease:    {}\nImage:      {}\nBuild:      {}\nActivation: {}\nLogs:       {}",
             result.image_name,
             result.release,
-            observed.image_state,
+            observed.image_state_name(),
             observed.version_state,
             observed.version_status,
             result.build_log_group
@@ -99,6 +99,7 @@ mod tests {
     use super::*;
     use crate::client::{Call, FakeMicroVmClient};
     use crate::test_support::{ROLE, active, project};
+    use aws_sdk_lambdamicrovms::types::MicrovmImageVersionStatus;
     use tempfile::TempDir;
 
     fn config() -> (TempDir, ProjectConfig) {
@@ -126,7 +127,10 @@ mod tests {
         let result = status(&cli, &config, &client, |_| {}).await.unwrap();
 
         assert_eq!(result.release, "demo@3");
-        assert_eq!(result.observation.version_status, "ACTIVE");
+        assert_eq!(
+            result.observation.version_status,
+            MicrovmImageVersionStatus::Active
+        );
         assert_eq!(inspected(&client.calls()).as_deref(), Some("3"));
     }
 
@@ -157,6 +161,24 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, ClankerError::ImageNotFound(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_unreported_release_reports_no_image_state() {
+        let client = FakeMicroVmClient::default();
+        let cli = StatusOptions {
+            release: Some("demo@9".into()),
+            ..StatusOptions::default()
+        };
+        let (_directory, config) = config();
+
+        let result = status(&cli, &config, &client, |_| {}).await.unwrap();
+
+        assert_eq!(result.observation.image_state_name(), "UNKNOWN");
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["imageState"], serde_json::Value::Null);
+        assert_eq!(json["versionState"], "PENDING");
+        assert_eq!(json["versionStatus"], "INACTIVE");
     }
 
     #[tokio::test]

@@ -45,7 +45,7 @@ pub struct PushSettings {
     #[arg(long)]
     pub minimum_memory_mib: Option<i32>,
     /// Image capability; repeat for multiple capabilities.
-    #[arg(long = "capability", visible_alias = "capabilities", value_parser = parse_capability)]
+    #[arg(long = "capability", visible_alias = "capabilities", value_parser = validate_capability)]
     pub capabilities: Option<Vec<String>>,
     #[arg(long)]
     pub egress: Option<String>,
@@ -96,11 +96,7 @@ impl PushSettings {
         self.capabilities
             .iter()
             .flatten()
-            .map(|capability| {
-                Capability::try_parse(capability).map_err(|_| {
-                    ClankerError::InvalidConfig(format!("unknown image capability `{capability}`"))
-                })
-            })
+            .map(|name| parse_capability(name).map_err(ClankerError::InvalidConfig))
             .collect()
     }
 
@@ -130,10 +126,13 @@ impl PushSettings {
     }
 }
 
-fn parse_capability(value: &str) -> Result<String, String> {
-    Capability::try_parse(value)
-        .map(|_| value.to_owned())
-        .map_err(|_| format!("unknown image capability `{value}`"))
+/// Keeps the spelling a user typed while rejecting capabilities AWS does not have.
+fn validate_capability(value: &str) -> Result<String, String> {
+    parse_capability(value).map(|_| value.to_owned())
+}
+
+fn parse_capability(value: &str) -> Result<Capability, String> {
+    Capability::try_parse(value).map_err(|_| format!("unknown image capability `{value}`"))
 }
 
 pub(super) async fn execute<T: MicroVmClient>(
@@ -189,6 +188,7 @@ mod tests {
     use super::*;
     use crate::client::{Call, FakeMicroVmClient, MicroVmClientError};
     use crate::test_support::{self, active};
+    use aws_sdk_lambdamicrovms::types::MicrovmImageVersionStatus;
     use std::fs;
     use tempfile::TempDir;
 
@@ -254,7 +254,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.release, "demo@1");
-        assert_eq!(result.observation.version_status, "ACTIVE");
+        assert_eq!(
+            result.observation.version_status,
+            MicrovmImageVersionStatus::Active
+        );
         let calls = client.calls();
         let [
             Call::Publish(spec),
@@ -269,7 +272,7 @@ mod tests {
             "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
         );
         assert_eq!(spec.tags.get("team").map(String::as_str), Some("platform"));
-        assert_eq!(spec.configuration.hooks.port, 9000);
+        assert_eq!(spec.configuration.hooks.port(), Some(9000));
         assert_eq!(spec.configuration.description, format!("Bundle {digest}"));
         assert_eq!(
             arn.as_str(),

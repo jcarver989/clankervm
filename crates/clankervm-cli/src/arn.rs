@@ -44,6 +44,11 @@ impl Arn {
         &self.0
     }
 
+    /// The region of `arn:partition:service:region:account:resource`.
+    pub(crate) fn region(&self) -> Option<&str> {
+        self.0.split(':').nth(3).filter(|region| !region.is_empty())
+    }
+
     /// The account id of `arn:partition:service:region:account:resource`.
     pub(crate) fn account(&self) -> Option<&str> {
         self.0
@@ -85,6 +90,17 @@ mod tests {
             Arn::parse("arn:aws:lambda:us-east-1::image")
                 .unwrap()
                 .account(),
+            None
+        );
+    }
+
+    #[test]
+    fn region_is_the_fourth_component() {
+        let arn = Arn::parse("arn:aws:lambda:us-east-1:123456789012:microvm-image:demo").unwrap();
+        assert_eq!(arn.region(), Some("us-east-1"));
+
+        assert_eq!(
+            Arn::parse("arn:aws:lambda::123:image").unwrap().region(),
             None
         );
     }

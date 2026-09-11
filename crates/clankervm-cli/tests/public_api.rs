@@ -6,7 +6,11 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
-use support::{FakeAws, IMAGE_CREATED, IMAGE_CREATING, Response, VERSION_ACTIVE, VERSION_PENDING};
+use support::{
+    FakeAws, IMAGE_CREATED, IMAGE_CREATING, MICROVMS_NONE, MICROVMS_PAGE_RUNNING,
+    MICROVMS_PAGE_TERMINATED, Response, VERSION_ACTIVE, VERSION_PENDING, VERSIONS_PAGE_ACTIVE,
+    VERSIONS_PAGE_DELETED,
+};
 use tempfile::TempDir;
 
 /// A `[push]` and `[run]` configuration with every deployment role set.
@@ -20,12 +24,21 @@ execution-role-arn = "arn:aws:iam::123456789012:role/run"
 log-group = "/demo/runs"
 "#;
 
+/// A `[push]` that releases and then prunes everything but the newest version.
+const PRUNING_CONFIG: &str = r#"[push]
+artifact-bucket = "bucket"
+build-role-arn = "arn:aws:iam::123456789012:role/build"
+keep-versions = 1
+[run]
+execution-role-arn = "arn:aws:iam::123456789012:role/run"
+"#;
+
 #[test]
 fn help_exposes_release_workflow() {
     let output = run_cli(Path::new("."), &["--help"], "");
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    for command in ["init", "push", "status", "run"] {
+    for command in ["init", "push", "status", "list", "run"] {
         assert!(text.contains(command), "missing {command} in {text}");
     }
     for removed in ["  bundle", "  wait"] {
@@ -92,6 +105,37 @@ fn push_accepts_a_directory_or_zip_path() {
         };
         assert_eq!(push.source.as_deref(), Some(Path::new(path)));
     }
+}
+
+#[test]
+fn list_takes_filters_a_scope_switch_and_its_own_timeout() {
+    assert!(Cli::try_parse_from(["clankervm", "list", "--image-version", "7"]).is_err());
+    assert!(Cli::try_parse_from(["clankervm", "list", "--state", "RUNNING", "--all"]).is_err());
+
+    let ClankerCommand::List(list) = parse(&[
+        "list",
+        "--image",
+        "demo",
+        "--state",
+        "running",
+        "--state",
+        "PENDING",
+        "--timeout",
+        "30s",
+    ]) else {
+        panic!("expected list command");
+    };
+
+    assert_eq!(list.image.as_deref(), Some("demo"));
+    assert_eq!(list.states, ["running", "PENDING"]);
+    assert!(!list.all);
+    assert_eq!(list.timeout, std::time::Duration::from_secs(30));
+
+    let ClankerCommand::List(list) = parse(&["list", "--all"]) else {
+        panic!("expected list command");
+    };
+    assert!(list.all);
+    assert_eq!(list.timeout, std::time::Duration::from_secs(60));
 }
 
 #[test]
@@ -214,6 +258,132 @@ fn push_waits_for_the_exact_version_to_become_active() {
 }
 
 #[test]
+fn list_reports_every_page_and_formats_timestamps() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+    let fake = FakeAws::start(vec![
+        Response::ok(MICROVMS_PAGE_RUNNING),
+        Response::ok(MICROVMS_PAGE_TERMINATED),
+    ]);
+
+    let result = run_json(directory.path(), &["--format", "json", "list"], &fake.url());
+
+    let microvms = result["microvms"].as_array().unwrap();
+    assert_eq!(
+        microvms.len(),
+        1,
+        "terminated MicroVMs are hidden by default"
+    );
+    assert_eq!(microvms[0]["microvmId"], "microvm-1");
+    assert_eq!(microvms[0]["state"], "RUNNING");
+    assert_eq!(
+        microvms[0]["imageArn"],
+        "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
+    );
+    assert_eq!(microvms[0]["imageVersion"], "7");
+    assert_eq!(microvms[0]["startedAt"], "2026-08-25T00:00:00Z");
+
+    let requests = fake.finish();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].contains("maxResults=50"), "{}", requests[0]);
+    assert!(!requests[0].contains("imageIdentifier"), "{}", requests[0]);
+    assert!(requests[1].contains("nextToken=page-2"), "{}", requests[1]);
+}
+
+#[test]
+fn list_forwards_the_image_filters() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+    let fake = FakeAws::start(vec![Response::ok(MICROVMS_NONE)]);
+
+    let result = run_json(
+        directory.path(),
+        &[
+            "--format",
+            "json",
+            "list",
+            "--image",
+            "demo",
+            "--image-version",
+            "7",
+        ],
+        &fake.url(),
+    );
+
+    assert_eq!(result["microvms"].as_array().unwrap().len(), 0);
+    let request = fake.finish().pop().unwrap();
+    assert!(request.contains("imageIdentifier=demo"), "{request}");
+    assert!(request.contains("imageVersion=7"), "{request}");
+}
+
+#[test]
+fn list_human_output_names_the_region_and_the_scope() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+    let fake = FakeAws::start(vec![Response::ok(MICROVMS_NONE)]);
+
+    let output = run_cli(directory.path(), &["list"], &fake.url());
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Region:  us-east-1"), "{text}");
+    assert!(text.contains("Profile: default credential chain"), "{text}");
+    assert!(text.contains("No MicroVMs found."), "{text}");
+    assert!(text.contains("pass --all to include them"), "{text}");
+    fake.finish();
+}
+
+#[test]
+fn list_rejects_an_image_arn_from_another_region() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+
+    let output = run_cli(
+        directory.path(),
+        &[
+            "--format",
+            "json",
+            "list",
+            "--image",
+            "arn:aws:lambda:eu-west-1:123456789012:microvm-image:demo",
+        ],
+        "http://127.0.0.1:1",
+    );
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("is not in region `us-east-1`"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn list_fails_without_reporting_a_partial_page_run() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+    let fake = FakeAws::start(vec![
+        Response::ok(MICROVMS_PAGE_RUNNING),
+        Response::not_found(),
+    ]);
+
+    let output = run_cli(directory.path(), &["--format", "json", "list"], &fake.url());
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    fake.finish();
+}
+
+#[test]
 fn run_uses_project_defaults_and_forwards_client_token() {
     let directory = TempDir::new().unwrap();
     write_config(directory.path(), FULL_CONFIG);
@@ -234,6 +404,66 @@ fn run_uses_project_defaults_and_forwards_client_token() {
             "missing {expected} in {request}"
         );
     }
+}
+
+#[test]
+fn push_prunes_every_page_of_old_versions() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), PRUNING_CONFIG);
+    let fake = FakeAws::start(vec![
+        Response::ok("{}"),
+        Response::not_found(),
+        Response::ok(IMAGE_CREATING),
+        Response::ok(IMAGE_CREATED),
+        Response::ok(VERSION_ACTIVE),
+        Response::ok(VERSIONS_PAGE_ACTIVE),
+        Response::ok(VERSIONS_PAGE_DELETED),
+        Response::ok("{}"),
+    ]);
+
+    let result = run_json(
+        directory.path(),
+        &["--format", "json", "push", "--timeout", "5s"],
+        &fake.url(),
+    );
+
+    assert_eq!(result["release"], "demo@2");
+    let requests = fake.finish();
+    assert_eq!(requests.len(), 8, "{requests:#?}");
+    assert!(requests[5].contains("maxResults=50"), "{}", requests[5]);
+    assert!(
+        requests[6].contains("nextToken=versions-2"),
+        "{}",
+        requests[6]
+    );
+    let deleted: Vec<&String> = requests
+        .iter()
+        .filter(|request| request.starts_with("DELETE "))
+        .collect();
+    assert_eq!(deleted.len(), 1, "{requests:#?}");
+    assert!(
+        deleted[0].contains("/versions/1"),
+        "the active version and the deleted one are skipped: {}",
+        deleted[0]
+    );
+}
+
+#[test]
+fn service_failures_report_the_code_and_message_aws_returns() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+    let fake = FakeAws::start(vec![Response::access_denied()]);
+
+    let output = run_cli(directory.path(), &["--format", "json", "list"], &fake.url());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("list MicroVMs failed"), "{stderr}");
+    assert!(
+        stderr.contains("AccessDeniedException: not allowed to list MicroVMs"),
+        "{stderr}"
+    );
+    fake.finish();
 }
 
 fn parse(args: &[&str]) -> ClankerCommand {

@@ -772,6 +772,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-lambdamicrovms",
  "aws-sdk-s3",
+ "aws-smithy-types",
  "base16ct 1.0.0",
  "clap",
  "humantime",
