@@ -1,96 +1,194 @@
-# ClankerVM CLI
+# clankervm CLI
 
-`clankervm` bundles, releases, inspects, and runs AWS Lambda MicroVM applications.
+`clankervm` deploys and runs AWS Lambda MicroVM images.
 
-## Quick start
+## Requirements
+
+- AWS credentials available through the standard AWS SDK credential chain.
+- A prepared image directory or ZIP file.
+- An S3 artifact bucket and IAM roles for building and running MicroVMs.
+
+## Create a project
 
 ```sh
-clankervm init --name my-runner --region us-west-2 \
+clankervm init \
+  --name my-runner \
+  --region us-west-2 \
   --artifact-bucket "$BUCKET" \
   --build-role-arn "$BUILD_ROLE_ARN" \
   --execution-role-arn "$EXECUTION_ROLE_ARN"
-clankervm push
-clankervm run -- echo 'hello from a MicroVM'
 ```
 
-AWS credentials use the standard AWS SDK credential chain and are never stored in the project file. Set `image.profile` to select a named AWS profile without storing its credentials. If any required deployment values are omitted from `init`, it writes their keys with empty-string placeholders so the generated file remains an explicit checklist.
+This creates `clankervm.toml`. Pass `--force` to replace an existing file.
 
-## Configuration (schema version 1)
+## Configuration
 
-Each configuration file describes exactly one image. Repositories with multiple images use one file per image and select it with the global `--config PATH` option. ClankerVM intentionally has no profile inheritance or configuration includes.
+A project file with all supported settings:
 
 ```toml
-schema-version = 1
-
-[image]
-name = "my-runner"
+[aws]
 region = "us-west-2"
-profile = "Production-PowerUser"
+profile = "my-aws-profile"
 
-[push]
-context = "image"
-artifact-bucket = "my-microvm-artifacts"
-build-role-arn = "arn:aws:iam::123456789012:role/MicroVmBuildRole"
+[microvm]
+name = "my-runner"
+
+[microvm.image]
 base-image = "al2023-1"
-minimum-memory-mib = 4096
-capabilities = ["ALL"]
+minimum-memory-mib = 512
+os-capabilities = ["ALL"]
+iam-role = "arn:aws:iam::123456789012:role/clankervm-build"
+tags = ["team=platform"]
+
+[microvm.image.artifact]
+source = "."
+s3-bucket = "my-artifact-bucket"
+s3-prefix = "clankervm"
+
+[microvm.image.network]
 egress = "INTERNET_EGRESS"
-keep-versions = 3
-tags = ["imageName=my-runner", "team=platform"]
+
+[microvm.image.hooks]
 port = 9000
-ready-timeout-seconds = 300
-run-timeout-seconds = 60
-terminate-timeout-seconds = 30
-timeout = "1h"
+ready-timeout = "5m"
+validate-timeout = "5m"
+run-timeout = "1m"
+terminate-timeout = "30s"
 
-[status]
-timeout = "1h"
+[microvm.image.hooks.ready]
+command = ["/usr/local/bin/prepare-workspace", "--repository", "owner/repo"]
+environment = ["WORKSPACE=/workspace/repo"]
 
-[run]
+[microvm.image.hooks.validate]
+command = ["/usr/local/bin/check-workspace"]
+environment = ["WORKSPACE=/workspace/repo"]
+
+[microvm.image.versions]
+max = 10
+wait-timeout = "1h"
+
+[microvm.run]
+iam-role = "arn:aws:iam::123456789012:role/clankervm-execution"
 command = ["/usr/local/bin/my-job", "--job-id", "42"]
-environment = ["LOG_LEVEL=info", "DRY_RUN=false"]
-execution-role-arn = "arn:aws:iam::123456789012:role/MicroVmExecutionRole"
-log-group = "/my-runner/microvms"
+environment = ["LOG_LEVEL=info"]
 max-duration = 3600
+
+[microvm.run.network]
 ingress = "NO_INGRESS"
 egress = "INTERNET_EGRESS"
+
+[microvm.run.logs]
+group = "/my-runner/microvms"
+stream = "..."
+since = "30m"
+limit = 1000
+timeout = "1m"
 ```
 
-All push settings have corresponding `push` flags. For example:
+Only `aws.region` and `microvm.name` are required to load a project. Image and
+run tables are optional; each command checks its required settings (for example,
+push needs an artifact bucket and image IAM role). Unknown fields are rejected.
+
+Command-line settings override TOML settings; existing flag names are unchanged.
+For example, `--artifact-bucket` overrides `microvm.image.artifact.s3-bucket`,
+`--build-role-arn` overrides `microvm.image.iam-role`, and `--execution-role-arn`
+overrides `microvm.run.iam-role`. Lists supplied on the command line replace
+configured lists rather than appending to them. `--region` overrides `aws.region`.
+
+Artifact sources are resolved relative to the project file, defaulting to `.`.
+Hook timeouts use duration strings and must fit in a whole number of signed
+32-bit seconds; the corresponding CLI flags still accept integer seconds.
+`microvm.image.versions.max` controls pruning after a successful push; omitting
+it disables pruning. `wait-timeout` applies to both push and `status --wait`
+(default `1h`), and each command's `--timeout` overrides it.
+
+`microvm.run.logs.group` sets both the launch log destination and the group read
+by `logs`. If omitted, logs uses `/aws/lambda-microvms/<name>`. `stream` defaults
+to the MicroVM ID and only affects log reads, as do `since`, `limit`, and `timeout`.
+`max-duration` is in seconds; log `since` and `timeout` use duration strings.
+
+Use one configuration file per image:
 
 ```sh
-clankervm push --context image --base-image al2023-1 \
-  --artifact-bucket "$BUCKET" --build-role-arn "$BUILD_ROLE_ARN" \
-  --tag imageName=my-runner --tag team=platform
+clankervm --config images/agent.toml push
+clankervm --config images/worker.toml run -- ./worker
 ```
 
-For every setting, command-line values take precedence over TOML values, which take precedence over built-in defaults. `--bundle PATH` is intentionally invocation-only and supplies an existing ZIP instead of `[push].context`. Tags must be `key=value`; malformed and duplicate tag keys are rejected. Unknown configuration fields are rejected.
+## Push an image
 
-For multiple images, keep each deployment unit explicit:
-
-```sh
-clankervm --config images/agent/clankervm.toml push
-clankervm --config images/worker/clankervm.toml push
-```
-
-An explicit release such as `status my-runner@42` or `run --release my-runner@42` must match the image name in the selected configuration file.
-
-ClankerVM does not compile or prepare application assets. Prepare an image directory or ZIP with Docker, a shell script, `just`, Bazel, Nix, or another build system first.
-
-## Push
-
-`push` accepts either a prepared directory or a prebuilt ZIP. A directory is converted to a deterministic ZIP; an existing ZIP is validated and uploaded byte-for-byte. In both cases ClankerVM uses an immutable content-addressed S3 key, creates or updates the image through the Rust AWS SDK, and waits for the exact version returned by AWS. After activation, `keep-versions = N` deletes inactive versions beyond the newest N.
-
-With no path, `push` uses `[push].context`. The positional path overrides it. The invocation-only `--bundle` option remains supported for compatibility and is equivalent to passing the ZIP as the positional path.
+Use `microvm.image.artifact.source`, or pass a directory or ZIP explicitly:
 
 ```sh
 clankervm push
 clankervm push path/to/prepared-directory
 clankervm push path/to/image.zip
-clankervm push --bundle path/to/image.zip
 ```
 
-## Status
+Override settings for one release:
+
+```sh
+clankervm push \
+  --artifact-bucket "$BUCKET" \
+  --build-role-arn "$BUILD_ROLE_ARN" \
+  --base-image al2023-1 \
+  --tag team=platform \
+  --tag imageName=my-runner
+```
+
+### Initialize before snapshotting
+
+`microvm.image.hooks.ready` optionally runs a command once when `clankervm-server`
+starts during image creation. It uses the same command array and `KEY=VALUE`
+environment list as `microvm.run`; commands are executed directly, not through a
+shell. Use `["/bin/sh", "-c", "..."]` explicitly for shell syntax. Paths refer to
+files inside the image, and the command inherits the server's working directory,
+user, and environment. `AWS_REGION` and `AWS_DEFAULT_REGION` use the configured
+region, including any `--region` override.
+
+The server immediately returns HTTP 503 from `/ready` while initialization runs,
+then HTTP 200 only after the command exits successfully. A spawn or command failure
+stops the server with an error; polling does not retry the command. Runs are rejected
+until initialization succeeds. Shutdown cancels initialization and waits for its
+process group, using the same grace period as run commands.
+
+Use this to clone a repository and install dependencies before AWS captures disk
+and memory. The completed initialization is part of the snapshot and is not rerun
+when that snapshot is restored. Without this table, readiness is immediate as before.
+The existing `microvm.image.hooks.ready-timeout` (default `5m`, AWS range `1s`–`1h`)
+and `--ready-timeout-seconds` still control AWS's readiness deadline.
+
+This requires a server version supporting `CLANKERVM_READY_HOOK_PAYLOAD`; older
+servers ignore the setting and must be upgraded. Push sends the command as JSON in
+that image environment variable (maximum 4096 encoded bytes). Configuration changes
+are sent on both image creation and updates; removing the table clears the setting.
+Do not put secrets in this table: it is persisted in AWS image configuration and the
+snapshot. Fetch narrowly scoped build credentials when needed and ensure neither
+credentials nor per-run identity/state remain in disk or memory at readiness.
+Runtime secrets should be fetched after restore.
+
+### Validate after snapshot restoration
+
+`microvm.image.hooks.validate` uses the same command array and environment list as
+`ready`. It enables AWS's validate hook and sends the command in the image environment
+variable `CLANKERVM_VALIDATE_HOOK_PAYLOAD` (maximum 4096 encoded bytes). Removing the
+table disables the hook and removes its payload on the next push.
+
+Unlike initialization, validation starts only on the first `/validate` request,
+on the validation VM restored from the completed snapshot. Requests return HTTP 503
+immediately while it runs, then HTTP 200 after successful completion. Repeated or
+concurrent polls do not rerun the command. Failures stop the server without passing
+validation. `/run` and validation cannot execute concurrently; normal runs do not
+need to trigger validation. Shutdown cancels validation and cleans up its process group.
+
+AWS enforces `microvm.image.hooks.validate-timeout` (default `5m`, range `1s`–`1h`);
+`--validate-timeout-seconds` overrides it. The hook server adds no execution deadline.
+Use validation for restore checks and representative warmup workloads. Its filesystem
+changes are not saved back into the seed snapshot. The command inherits the server's
+user/working directory and receives the configured AWS region, just like `ready`.
+Do not put secrets in its configuration, which is stored with the image. Both the CLI
+and the image's server binary must support validation.
+
+## Check release status
 
 ```sh
 clankervm status
@@ -99,17 +197,89 @@ clankervm status --wait my-runner@42
 clankervm status --wait --timeout 10m my-runner@42
 ```
 
-`status --wait` uses `--timeout` over `[status].timeout`; it never uses the push timeout.
+## List MicroVMs
 
-## Run
+Terminated MicroVMs are hidden unless `--all` or an explicit `--state` is used.
+
+```sh
+clankervm list
+clankervm list --image my-runner
+clankervm list --image my-runner --image-version 42
+clankervm list --state RUNNING --state PENDING
+clankervm list --state TERMINATED
+clankervm --format json list --all
+```
+
+Available states: `PENDING`, `RUNNING`, `SUSPENDED`, `SUSPENDING`,
+`TERMINATING`, and `TERMINATED`.
+
+## Run a command
 
 ```sh
 clankervm run -- /usr/local/bin/my-job --job-id 42
-clankervm run --release my-runner@42 --client-token "$RUN_ID" --env LOG_LEVEL=debug -- ./job
+clankervm run --release my-runner@42 -- ./job
+clankervm run --env LOG_LEVEL=debug --env DRY_RUN=false -- ./job
 ```
 
-Run flags mirror `[run]` keys, including `--max-duration` and `max-duration`. `run.command` provides a default executable and arguments; a command passed after `--` takes precedence. `run.environment` accepts `key=value` entries and repeatable `--env key=value` flags override the configured environment. Empty values are supported, malformed or duplicate keys are rejected, and `AWS_REGION` plus `AWS_DEFAULT_REGION` are set from `image.region`. A command is required from TOML or the CLI, and the complete payload shares AWS's 4096-byte run-hook limit.
+Use `microvm.run.command` when a command should be the default. A command after `--`
+overrides it. Environment entries use `KEY=VALUE`.
+
+Useful run options:
+
+```sh
+clankervm run \
+  --execution-role-arn "$EXECUTION_ROLE_ARN" \
+  --max-duration 3600 \
+  --ingress NO_INGRESS \
+  --egress INTERNET_EGRESS \
+  -- ./job
+```
+
+## Attach a shell
+
+Run `shell` from an interactive terminal:
+
+```sh
+# Launch, attach, and terminate a MicroVM on exit
+clankervm shell
+
+# Attach to an existing SHELL_INGRESS MicroVM
+clankervm shell microvm-0099
+
+# Keep a launched MicroVM after detaching
+clankervm shell --keep
+
+# Choose the command launched in the MicroVM
+clankervm shell -- htop
+```
+
+Press `Ctrl-]` to detach. A launched MicroVM uses the `SHELL_INGRESS`
+connector and is terminated when the session ends unless `--keep` is set.
+`shell` is interactive-only and cannot be combined with `--format json`.
+
+## Read logs
+
+```sh
+clankervm logs microvm-0099
+clankervm logs microvm-0099 --follow
+clankervm logs microvm-0099 --since 30m --limit 500
+clankervm logs microvm-0099 --raw
+clankervm logs microvm-0099 \
+  --log-group /my-runner/microvms \
+  --log-stream custom
+```
+
+`--follow` prints until Ctrl-C and cannot be combined with `--format json`.
 
 ## JSON output
 
-Use `--format json` for stable JSON on stdout. Human progress is written to stderr.
+Use the global option for machine-readable output:
+
+```sh
+clankervm --format json status
+clankervm --format json list
+clankervm --format json logs microvm-0099
+```
+
+Progress messages go to stderr. Run `clankervm COMMAND --help` for the complete
+option list.

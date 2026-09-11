@@ -1,131 +1,131 @@
 use super::error::MicroVmClientError;
-use crate::{Arn, Tags};
-use serde::{Deserialize, Deserializer};
-use std::str::FromStr;
+use crate::ClankerError;
+use crate::arn::Arn;
+use crate::artifact::Artifact;
+use aws_sdk_lambdamicrovms::types::{
+    Capability, Hooks, MicrovmImageState, MicrovmImageVersionState, MicrovmImageVersionStatus,
+    MicrovmState, Resources,
+};
+use aws_smithy_types::DateTime;
+use serde::{Serialize, Serializer};
+use std::collections::{BTreeMap, HashMap};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImageCapability {
-    All,
-}
+/// The ingress connector that makes AWS expose a MicroVM's pty.
+pub(crate) const SHELL_INGRESS: &str = "SHELL_INGRESS";
 
-impl ImageCapability {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "ALL",
-        }
-    }
-}
-
-impl FromStr for ImageCapability {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "ALL" => Ok(Self::All),
-            _ => Err(format!("unknown image capability `{value}`")),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ImageCapability {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImageHooks {
-    pub port: i32,
-    pub ready_timeout_seconds: i32,
-    pub run_timeout_seconds: i32,
-    pub terminate_timeout_seconds: i32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImageConfiguration {
+/// Everything AWS needs to build one image version, in AWS terms.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ImageConfiguration {
     pub base_image_arn: Arn,
     pub build_role_arn: Arn,
     pub description: String,
-    pub minimum_memory_mib: Option<i32>,
-    pub capabilities: Vec<ImageCapability>,
+    pub resources: Option<Vec<Resources>>,
+    pub capabilities: Vec<Capability>,
     pub egress_network_connector: Arn,
-    pub hooks: ImageHooks,
+    pub hooks: Hooks,
+    pub environment_variables: HashMap<String, String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublishImageRequest {
-    pub image_identifier: Arn,
+/// Everything the client needs to publish one bundle as an image version.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ImageSpec {
+    pub arn: Arn,
     pub name: String,
-    pub bundle: Vec<u8>,
-    pub bundle_digest: String,
-    pub artifact_bucket: String,
+    pub bucket: String,
+    /// The S3 key prefix bundles are uploaded under, without a trailing slash.
+    pub artifact_prefix: String,
+    pub tags: BTreeMap<String, String>,
     pub configuration: ImageConfiguration,
-    pub tags: Tags,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublishedImage {
-    pub image_version: String,
-    pub artifact_uri: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InspectImageRequest {
-    pub image_identifier: Arn,
-    pub image_version: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReleasePhase {
-    Pending,
-    Ready,
-    Failed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ObservedImageRelease {
-    pub image_version: String,
-    pub image_state: String,
-    pub version_state: String,
-    pub version_status: String,
-    pub state_reason: Option<String>,
-}
-
-impl ObservedImageRelease {
-    /// Unknown or unexpected AWS states fail fast instead of polling forever.
-    pub fn phase(&self) -> ReleasePhase {
-        let image_pending = matches!(
-            self.image_state.as_str(),
-            "CREATING" | "CREATED" | "UPDATING" | "UPDATED"
-        );
-        let version_pending = matches!(
-            self.version_state.as_str(),
-            "PENDING" | "IN_PROGRESS" | "SUCCESSFUL"
-        );
-        let ready = matches!(self.image_state.as_str(), "CREATED" | "UPDATED")
-            && self.version_state == "SUCCESSFUL"
-            && self.version_status == "ACTIVE";
-        if ready {
-            ReleasePhase::Ready
-        } else if image_pending && version_pending {
-            ReleasePhase::Pending
-        } else {
-            ReleasePhase::Failed
-        }
+impl ImageSpec {
+    /// The content-addressed object key of a published bundle.
+    ///
+    /// The prefix is configurable because an image's build role is often scoped
+    /// to a key prefix that predates ClankerVM.
+    pub(crate) fn artifact_key(&self, digest: &str) -> String {
+        format!(
+            "{}/{}/bundles/{digest}.zip",
+            self.artifact_prefix, self.name
+        )
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PruneImageVersionsRequest {
-    pub image_identifier: Arn,
-    pub versions_to_keep: usize,
+pub(crate) struct Published {
+    pub version: String,
+    pub artifact_uri: String,
 }
 
+/// What AWS currently reports for one image release.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Observation {
+    pub image_version: String,
+    /// Unset until AWS reports an image state; there is no placeholder state.
+    #[serde(serialize_with = "serialize_optional_state")]
+    pub image_state: Option<MicrovmImageState>,
+    #[serde(serialize_with = "serialize_state")]
+    pub version_state: MicrovmImageVersionState,
+    #[serde(serialize_with = "serialize_state")]
+    pub version_status: MicrovmImageVersionStatus,
+    pub state_reason: Option<String>,
+}
+
+impl Observation {
+    /// The image is built and this version is active.
+    pub(crate) fn is_ready(&self) -> bool {
+        matches!(
+            self.image_state,
+            Some(MicrovmImageState::Created | MicrovmImageState::Updated)
+        ) && self.version_state == MicrovmImageVersionState::Successful
+            && self.version_status == MicrovmImageVersionStatus::Active
+    }
+
+    /// Still building; unknown or unexpected states count as failures so
+    /// polling fails fast instead of waiting forever.
+    pub(crate) fn is_pending(&self) -> bool {
+        matches!(
+            self.image_state,
+            Some(
+                MicrovmImageState::Creating
+                    | MicrovmImageState::Created
+                    | MicrovmImageState::Updating
+                    | MicrovmImageState::Updated
+            )
+        ) && matches!(
+            self.version_state,
+            MicrovmImageVersionState::Pending
+                | MicrovmImageVersionState::InProgress
+                | MicrovmImageVersionState::Successful
+        )
+    }
+
+    /// The image state to show, or `UNKNOWN` before AWS reports one.
+    pub(crate) fn image_state_name(&self) -> &str {
+        self.image_state
+            .as_ref()
+            .map_or("UNKNOWN", MicrovmImageState::as_str)
+    }
+}
+
+/// A release AWS has not reported yet.
+impl Default for Observation {
+    fn default() -> Self {
+        Self {
+            image_version: String::new(),
+            image_state: None,
+            version_state: MicrovmImageVersionState::Pending,
+            version_status: MicrovmImageVersionStatus::Inactive,
+            state_reason: None,
+        }
+    }
+}
+
+/// Everything the client needs to start one MicroVM.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RunMicroVmRequest {
-    pub image_identifier: Arn,
+pub(crate) struct LaunchSpec {
+    pub image_arn: Arn,
     pub image_version: Option<String>,
     pub execution_role_arn: Arn,
     pub ingress_network_connector: Arn,
@@ -137,30 +137,212 @@ pub struct RunMicroVmRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RunMicroVmResponse {
+pub(crate) struct Launch {
     pub microvm_id: String,
     pub image_version: String,
 }
 
+/// One page of events read from one log stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LogPage {
+    pub events: Vec<LogEvent>,
+    /// Continues a forward read, and is unset when AWS reports no next page.
+    pub next_token: Option<String>,
+}
+
+/// One event read from a log stream.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LogEvent {
+    #[serde(serialize_with = "serialize_timestamp")]
+    pub timestamp: DateTime,
+    pub message: String,
+}
+
+/// Where a read of a stream starts and which way it goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LogWindow {
+    /// The newest events in the stream, read backwards from its end.
+    Newest,
+    /// Every event in the stream, read forwards from the oldest one.
+    Everything,
+    /// Every event at or after this instant, read forwards.
+    Since(DateTime),
+}
+
+impl LogWindow {
+    /// Whether events are read from the oldest one onwards, which is the only
+    /// direction that can be continued with a token.
+    pub(crate) fn is_forward(&self) -> bool {
+        !matches!(self, Self::Newest)
+    }
+
+    /// The instant the window starts at, in the milliseconds AWS expects.
+    pub(crate) fn start_time(&self) -> Option<i64> {
+        match self {
+            Self::Newest | Self::Everything => None,
+            Self::Since(start) => Some(start.to_millis().unwrap_or_default()),
+        }
+    }
+}
+
+/// Everything one read of one log stream needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LogQuery {
+    pub group: String,
+    pub stream: String,
+    pub window: LogWindow,
+    /// Events requested per page; AWS caps a page at 10,000 events.
+    pub limit: usize,
+    /// Continues a previous forward read, which makes AWS ignore the window.
+    pub next_token: Option<String>,
+}
+
+/// One MicroVM, as AWS discovery summarizes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MicroVmSummary {
+    pub microvm_id: String,
+    #[serde(serialize_with = "serialize_state")]
+    pub state: MicrovmState,
+    pub image_arn: String,
+    pub image_version: String,
+    #[serde(serialize_with = "serialize_timestamp")]
+    pub started_at: DateTime,
+}
+
+/// RFC3339 UTC, for example `2026-08-25T00:00:00Z`.
+fn serialize_timestamp<S: Serializer>(value: &DateTime, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&value.to_string())
+}
+
+/// Writes a string-backed AWS enum as the value AWS uses on the wire.
+fn serialize_state<S, T>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    T: AsRef<str>,
+{
+    serializer.serialize_str(value.as_ref())
+}
+
+/// Writes a not-yet-reported state as `null` instead of inventing one.
+///
+/// Serde hands `serialize_with` a reference to the field, hence `&Option<T>`.
+#[allow(clippy::ref_option)]
+fn serialize_optional_state<S, T>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    T: AsRef<str>,
+{
+    match value {
+        Some(state) => serializer.serialize_str(state.as_ref()),
+        None => serializer.serialize_none(),
+    }
+}
+
+pub(crate) type MicroVmPage = (Vec<MicroVmSummary>, Option<String>);
+
+/// One MicroVM as `GetMicrovm` describes it, in the terms `shell` needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MicroVmDetails {
+    pub microvm_id: String,
+    pub state: MicrovmState,
+    pub state_reason: Option<String>,
+    /// The host the MicroVM's pty is reachable at.
+    pub endpoint: String,
+    pub ingress_network_connectors: Vec<String>,
+}
+
+/// The handshake headers a MicroVM's `/shell` endpoint authenticates with.
+///
+/// Deliberately not `Debug`: the headers carry a bearer token that must never
+/// reach a log line or an error message.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ShellToken {
+    pub headers: HashMap<String, String>,
+}
+
+/// An image name or ARN accepted by AWS `image_identifier`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ImageIdentifier {
+    Name(String),
+    Arn(Arn),
+}
+
+impl ImageIdentifier {
+    /// A bare name passes through; an explicit ARN must address `region`.
+    pub(crate) fn parse(value: &str, region: &str) -> Result<Self, ClankerError> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(ClankerError::InvalidConfig(
+                "image filter cannot be empty".into(),
+            ));
+        }
+        if !value.starts_with("arn:") {
+            return Ok(Self::Name(value.to_owned()));
+        }
+        let arn = Arn::parse(value)?;
+        if arn.region() != Some(region) {
+            return Err(ClankerError::InvalidConfig(format!(
+                "image ARN `{value}` is not in region `{region}`"
+            )));
+        }
+        Ok(Self::Arn(arn))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Name(name) => name,
+            Self::Arn(arn) => arn.as_str(),
+        }
+    }
+}
+
+/// The AWS operations ClankerVM performs, expressed in domain terms.
 #[allow(async_fn_in_trait)]
-pub trait MicroVmClient: Send + Sync {
-    async fn publish_image(
+pub(crate) trait MicroVmClient: Send + Sync {
+    /// Creates or updates the image and returns the version AWS reports.
+    async fn publish(
         &self,
-        request: PublishImageRequest,
-    ) -> Result<PublishedImage, MicroVmClientError>;
+        spec: &ImageSpec,
+        bundle: &Artifact,
+    ) -> Result<Published, MicroVmClientError>;
 
-    async fn inspect_image(
+    /// The current release state, or `None` when the image or version is gone.
+    async fn observe(
         &self,
-        request: InspectImageRequest,
-    ) -> Result<Option<ObservedImageRelease>, MicroVmClientError>;
+        image: &Arn,
+        version: Option<&str>,
+    ) -> Result<Option<Observation>, MicroVmClientError>;
 
-    async fn prune_image_versions(
-        &self,
-        request: PruneImageVersionsRequest,
-    ) -> Result<(), MicroVmClientError>;
+    /// Deletes inactive versions beyond the newest `keep`.
+    async fn prune(&self, image: &Arn, keep: usize) -> Result<(), MicroVmClientError>;
 
-    async fn run_microvm(
+    /// One page of MicroVMs and the token of the page after it.
+    async fn list_microvms(
         &self,
-        request: RunMicroVmRequest,
-    ) -> Result<RunMicroVmResponse, MicroVmClientError>;
+        image: Option<&ImageIdentifier>,
+        version: Option<&str>,
+        next_token: Option<&str>,
+    ) -> Result<MicroVmPage, MicroVmClientError>;
+
+    async fn launch(&self, spec: &LaunchSpec) -> Result<Launch, MicroVmClientError>;
+
+    /// The names of the streams one log group holds.
+    async fn log_streams(&self, group: &str) -> Result<Vec<String>, MicroVmClientError>;
+
+    /// One page of events from one stream, oldest first.
+    async fn log_events(&self, query: &LogQuery) -> Result<LogPage, MicroVmClientError>;
+
+    /// The current description of one MicroVM, or `None` when it is gone.
+    async fn describe(
+        &self,
+        microvm_id: &str,
+    ) -> Result<Option<MicroVmDetails>, MicroVmClientError>;
+
+    /// A token that authenticates a `/shell` handshake.
+    async fn shell_token(&self, microvm_id: &str) -> Result<ShellToken, MicroVmClientError>;
+
+    /// Stops one MicroVM; a MicroVM that is already gone is not an error.
+    async fn terminate(&self, microvm_id: &str) -> Result<(), MicroVmClientError>;
 }

@@ -7,6 +7,21 @@ use std::time::Duration;
 use support::{RunScriptBuilder, TestServerBuilder, wait_until_gone};
 
 #[tokio::test]
+async fn sigterm_cancels_initialization_before_readiness() {
+    let script = RunScriptBuilder::new("ready-command").build();
+    let server = TestServerBuilder::new()
+        .terminate_grace_period(Duration::from_secs(2))
+        .ready_command(script.payload())
+        .start_process();
+    let (command_pid, child_pid) = script.pids().await;
+    kill(server.pid(), Signal::SIGTERM).unwrap();
+    assert!(server.wait_with_output().await.status.success());
+    assert!(script.was_terminated());
+    wait_until_gone(command_pid).await;
+    wait_until_gone(child_pid).await;
+}
+
+#[tokio::test]
 async fn sigterm_gracefully_stops_the_run_process_group_without_logging_secrets() {
     const SECRET: &str = "github-token-that-must-not-leak";
 

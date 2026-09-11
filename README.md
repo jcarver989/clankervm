@@ -1,16 +1,6 @@
 # ClankerVM
 
-ClankerVM makes AWS Lambda MicroVM applications feel like projects rather than collections of AWS API calls:
-
-```text
-source ──push──> active image release ──run──> MicroVM
-```
-
-The workspace contains:
-
-- `clankervm`: the host-side project CLI.
-- `clankervm-server`: the lifecycle hook server installed inside an image.
-- `examples/minimal`: a minimal image context containing the hook server.
+Deploy and run AWS Lambda MicroVMs from a project directory.
 
 ## Install
 
@@ -21,9 +11,10 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   | sh
 ```
 
-## Usage
+## Quick start
 
-Configure the project once:
+1. Prepare an image directory or ZIP.
+2. Create a project file:
 
 ```sh
 clankervm init \
@@ -34,23 +25,72 @@ clankervm init \
   --execution-role-arn "$EXECUTION_ROLE_ARN"
 ```
 
-Then release and run it:
+3. Release and run the image:
 
 ```sh
 clankervm push
 clankervm run -- /usr/local/bin/my-job --job-id 42
 ```
 
-Each configuration file describes one image; repositories with multiple images select separate files with `--config PATH`. `push` accepts either a prepared directory or a prebuilt ZIP. It creates a deterministic ZIP for directories, preserves an existing ZIP byte-for-byte, uploads the content-addressed artifact through the Rust AWS SDK, creates or updates the named image, and waits for the exact returned image version to become active. With no path it uses `[push].context`; `push --bundle PATH` remains available as a compatibility alias for a prebuilt ZIP. ClankerVM stores no local deployment state and has no AWS CLI dependency. See the [CLI configuration reference](crates/clankervm-cli/README.md) for schema version 1 and push/run/status defaults.
+AWS credentials come from the standard AWS SDK credential chain. Use
+`aws.profile` in `clankervm.toml` to select a named profile.
 
-`status` performs a one-shot inspection; `status --wait NAME@VERSION` waits for an exact release to become active.
+## Commands
 
-`run` launches the configured image with an explicit command and arguments. The run-hook payload is limited to 4096 bytes.
+```sh
+# Create or replace a project file
+clankervm init --name NAME --region REGION [--force]
 
-See [`crates/clankervm-cli/README.md`](crates/clankervm-cli/README.md) for project configuration, prepared source contexts, release monitoring, JSON output, and run options.
+# Release the configured context, directory, or ZIP
+clankervm push
+clankervm push path/to/image
+clankervm push path/to/image.zip
 
-ClankerVM is under active development. The AWS Lambda MicroVM service and its API may change.
+# Inspect a release
+clankervm status
+clankervm status NAME@VERSION
+clankervm status --wait NAME@VERSION
 
-## License
+# List MicroVMs
+clankervm list
+clankervm list --image NAME --state RUNNING
+clankervm --format json list --all
 
-MIT
+# Run a command
+clankervm run -- /path/to/program ARG...
+clankervm run --release NAME@VERSION -- ./job
+
+# Attach an interactive shell
+clankervm shell
+clankervm shell MICROVM_ID
+clankervm shell --keep
+# Press Ctrl-] to detach.
+
+# Read logs
+clankervm logs MICROVM_ID
+clankervm logs MICROVM_ID --follow
+clankervm logs MICROVM_ID --since 30m --limit 500
+```
+
+## Project files
+
+Each `clankervm.toml` describes one image. Use one file per image and select it
+with `--config`:
+
+```sh
+clankervm --config images/worker.toml push
+```
+
+See the [CLI usage reference](crates/clankervm-cli/README.md) for configuration
+fields, command options, and JSON output.
+
+## Global options
+
+```sh
+clankervm --config PATH COMMAND
+clankervm --region REGION COMMAND
+clankervm --format human COMMAND
+clankervm --format json COMMAND
+```
+
+Run `clankervm --help` or `clankervm COMMAND --help` for all options.

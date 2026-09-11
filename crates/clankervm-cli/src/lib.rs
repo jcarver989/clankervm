@@ -3,11 +3,10 @@ mod artifact;
 mod client;
 mod commands;
 mod config;
-mod environment;
 mod output;
 mod payload;
 mod release;
-mod tags;
+mod shell;
 #[cfg(test)]
 mod test_support;
 mod util;
@@ -18,13 +17,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub use client::MicroVmClientError;
-pub use commands::Command;
-pub use payload::{PayloadError, build_run_payload, build_run_payload_with_environment};
-
-pub(crate) use arn::Arn;
-pub(crate) use client::AwsMicroVmClient;
-pub(crate) use config::Project;
-pub(crate) use tags::Tags;
+pub use commands::{Command, execute};
+pub use shell::ShellError;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -72,12 +66,8 @@ pub enum ClankerError {
         #[source]
         source: std::io::Error,
     },
-    #[error("invalid release `{0}`; expected NAME@VERSION")]
-    InvalidRelease(String),
-    #[error("invalid image `{0}`")]
-    InvalidImage(String),
-    #[error("invalid ARN `{0}`")]
-    InvalidArn(String),
+    #[error("image {0} does not exist; push a release first")]
+    ImageNotFound(String),
     #[error(transparent)]
     MicroVmClient(#[from] MicroVmClientError),
     #[error("release {release} failed: {reason}\nBuild logs: {log_group}")]
@@ -90,14 +80,67 @@ pub enum ClankerError {
         "timed out after {timeout:?} waiting for {release}\nResume with: clankervm status --wait {release}"
     )]
     WaitTimeout { release: String, timeout: Duration },
+    #[error("timed out after {timeout:?} listing MicroVMs; raise --timeout or narrow the filters")]
+    ListTimeout { timeout: Duration },
+    #[error(
+        "timed out after {timeout:?} reading {stream} in {group}; raise --timeout or narrow --since"
+    )]
+    LogsTimeout {
+        timeout: Duration,
+        group: String,
+        stream: String,
+    },
+    #[error(
+        "no log stream `{stream}` in log group `{group}`{}; pass --log-group or --log-stream to read another destination",
+        streams_hint(streams)
+    )]
+    LogStreamNotFound {
+        group: String,
+        stream: String,
+        streams: Vec<String>,
+    },
     #[error("project file already exists: {0}; pass --force to replace it")]
     AlreadyInitialized(PathBuf),
-    #[error(transparent)]
-    Payload(#[from] PayloadError),
     #[error("failed to serialize output: {0}")]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Shell(#[from] shell::ShellError),
+    #[error(
+        "`clankervm shell` needs an interactive terminal; run it from a terminal, not from a pipe or a script"
+    )]
+    NotATerminal,
+    #[error("MicroVM `{0}` does not exist")]
+    MicroVmNotFound(String),
+    #[error(
+        "MicroVM `{microvm_id}` is {state}, not RUNNING{}",
+        reason.as_deref().map_or(String::new(), |reason| format!(" ({reason})"))
+    )]
+    MicroVmNotRunning {
+        microvm_id: String,
+        state: String,
+        reason: Option<String>,
+    },
+    #[error("timed out after {timeout:?} waiting for MicroVM `{microvm_id}`")]
+    MicroVmWaitTimeout {
+        microvm_id: String,
+        timeout: Duration,
+    },
+    #[error("MicroVM `{0}` was not confirmed terminated; check it with `clankervm list`")]
+    MicroVmTerminationUnconfirmed(String),
 }
 
-pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
-    commands::execute(cli.command, cli.config, cli.format, cli.region).await
+/// How many stream names an error names before it stops listing them.
+const MAX_LISTED_STREAMS: usize = 5;
+
+/// The streams a log group does have, so a wrong stream name is obvious.
+fn streams_hint(streams: &[String]) -> String {
+    if streams.is_empty() {
+        return String::new();
+    }
+    let listed: Vec<&str> = streams
+        .iter()
+        .take(MAX_LISTED_STREAMS)
+        .map(String::as_str)
+        .collect();
+    format!("; the group has: {}", listed.join(", "))
 }

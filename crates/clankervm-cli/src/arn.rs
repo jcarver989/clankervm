@@ -4,74 +4,57 @@ use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct Arn(String);
+pub(crate) struct Arn(String);
 
 impl Arn {
-    pub fn parse(value: &str) -> Result<Self, ClankerError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, ClankerError> {
         if !is_valid(value) {
-            return Err(ClankerError::InvalidArn(value.into()));
+            return Err(ClankerError::InvalidConfig(format!(
+                "invalid ARN `{value}`"
+            )));
         }
         Ok(Self(value.into()))
     }
 
-    pub fn image(image: &str, region: &str, account_id: &str) -> Result<Self, ClankerError> {
-        if image.starts_with("arn:") {
-            return Self::parse(image).map_err(|_| ClankerError::InvalidImage(image.into()));
-        }
-
-        if image.is_empty() {
-            return Err(ClankerError::InvalidImage(image.into()));
-        }
-
-        Ok(Self::lambda_resource(
-            region,
-            account_id,
-            "microvm-image",
-            image,
-        ))
-    }
-
-    pub fn base_image(region: &str, image: &str) -> Result<Self, ClankerError> {
-        Self::resource_or_aws(region, "microvm-image", image)
-    }
-
-    pub fn network_connector(region: &str, connector: &str) -> Result<Self, ClankerError> {
-        Self::resource_or_aws(
-            region,
-            "network-connector",
-            &format!("aws-network-connector:{connector}"),
-        )
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_string(self) -> String {
-        self.0
-    }
-
-    fn resource_or_aws(
+    /// A Lambda MicroVMs resource: a full ARN is used as-is, a bare name is expanded.
+    pub(crate) fn lambda(
         region: &str,
+        account: &str,
         resource_type: &str,
         resource: &str,
     ) -> Result<Self, ClankerError> {
         if resource.starts_with("arn:") {
-            Self::parse(resource)
-        } else {
-            Ok(Self::lambda_resource(
-                region,
-                "aws",
-                resource_type,
-                resource,
-            ))
+            return Self::parse(resource);
         }
+        Ok(Self(format!(
+            "arn:aws:lambda:{region}:{account}:{resource_type}:{resource}"
+        )))
     }
 
-    fn lambda_resource(region: &str, account: &str, resource_type: &str, resource: &str) -> Self {
-        Self(format!(
-            "arn:aws:lambda:{region}:{account}:{resource_type}:{resource}"
-        ))
+    pub(crate) fn network_connector(region: &str, connector: &str) -> Result<Self, ClankerError> {
+        let resource = if connector.starts_with("arn:") {
+            connector.to_owned()
+        } else {
+            format!("aws-network-connector:{connector}")
+        };
+        Self::lambda(region, "aws", "network-connector", &resource)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The region of `arn:partition:service:region:account:resource`.
+    pub(crate) fn region(&self) -> Option<&str> {
+        self.0.split(':').nth(3).filter(|region| !region.is_empty())
+    }
+
+    /// The account id of `arn:partition:service:region:account:resource`.
+    pub(crate) fn account(&self) -> Option<&str> {
+        self.0
+            .split(':')
+            .nth(4)
+            .filter(|account| !account.is_empty())
     }
 }
 
@@ -88,12 +71,6 @@ fn is_valid(value: &str) -> bool {
         && parts.next().is_some_and(|part| !part.is_empty())
 }
 
-impl AsRef<str> for Arn {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
 impl fmt::Display for Arn {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -103,6 +80,30 @@ impl fmt::Display for Arn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_is_the_fifth_component() {
+        let arn = Arn::parse("arn:aws:lambda:us-east-1:123456789012:microvm-image:demo").unwrap();
+        assert_eq!(arn.account(), Some("123456789012"));
+
+        assert_eq!(
+            Arn::parse("arn:aws:lambda:us-east-1::image")
+                .unwrap()
+                .account(),
+            None
+        );
+    }
+
+    #[test]
+    fn region_is_the_fourth_component() {
+        let arn = Arn::parse("arn:aws:lambda:us-east-1:123456789012:microvm-image:demo").unwrap();
+        assert_eq!(arn.region(), Some("us-east-1"));
+
+        assert_eq!(
+            Arn::parse("arn:aws:lambda::123:image").unwrap().region(),
+            None
+        );
+    }
 
     #[test]
     fn parse_accepts_resources_containing_colons() {
@@ -130,12 +131,21 @@ mod tests {
     #[test]
     fn constructors_resolve_shorthand_resources() {
         assert_eq!(
-            Arn::image("demo", "us-east-1", "123").unwrap().as_str(),
+            Arn::lambda("us-east-1", "123", "microvm-image", "demo")
+                .unwrap()
+                .as_str(),
             "arn:aws:lambda:us-east-1:123:microvm-image:demo"
         );
         assert_eq!(
-            Arn::base_image("us-east-1", "al2023-1").unwrap().as_str(),
-            "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1"
+            Arn::lambda(
+                "us-east-1",
+                "aws",
+                "microvm-image",
+                "arn:aws:lambda:eu-west-1:aws:microvm-image:al2023-1"
+            )
+            .unwrap()
+            .as_str(),
+            "arn:aws:lambda:eu-west-1:aws:microvm-image:al2023-1"
         );
         assert_eq!(
             Arn::network_connector("us-east-1", "INTERNET_EGRESS")
