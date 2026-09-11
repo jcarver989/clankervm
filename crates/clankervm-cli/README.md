@@ -51,11 +51,16 @@ egress = "INTERNET_EGRESS"
 [microvm.image.hooks]
 port = 9000
 ready-timeout = "5m"
+validate-timeout = "5m"
 run-timeout = "1m"
 terminate-timeout = "30s"
 
 [microvm.image.hooks.ready]
 command = ["/usr/local/bin/prepare-workspace", "--repository", "owner/repo"]
+environment = ["WORKSPACE=/workspace/repo"]
+
+[microvm.image.hooks.validate]
+command = ["/usr/local/bin/check-workspace"]
 environment = ["WORKSPACE=/workspace/repo"]
 
 [microvm.image.versions]
@@ -159,8 +164,29 @@ are sent on both image creation and updates; removing the table clears the setti
 Do not put secrets in this table: it is persisted in AWS image configuration and the
 snapshot. Fetch narrowly scoped build credentials when needed and ensure neither
 credentials nor per-run identity/state remain in disk or memory at readiness.
-Runtime secrets should be fetched after restore. Post-snapshot `/validate` commands
-are not implemented yet.
+Runtime secrets should be fetched after restore.
+
+### Validate after snapshot restoration
+
+`microvm.image.hooks.validate` uses the same command array and environment list as
+`ready`. It enables AWS's validate hook and sends the command in the image environment
+variable `CLANKERVM_VALIDATE_HOOK_PAYLOAD` (maximum 4096 encoded bytes). Removing the
+table disables the hook and removes its payload on the next push.
+
+Unlike initialization, validation starts only on the first `/validate` request,
+on the validation VM restored from the completed snapshot. Requests return HTTP 503
+immediately while it runs, then HTTP 200 after successful completion. Repeated or
+concurrent polls do not rerun the command. Failures stop the server without passing
+validation. `/run` and validation cannot execute concurrently; normal runs do not
+need to trigger validation. Shutdown cancels validation and cleans up its process group.
+
+AWS enforces `microvm.image.hooks.validate-timeout` (default `5m`, range `1s`–`1h`);
+`--validate-timeout-seconds` overrides it. The hook server adds no execution deadline.
+Use validation for restore checks and representative warmup workloads. Its filesystem
+changes are not saved back into the seed snapshot. The command inherits the server's
+user/working directory and receives the configured AWS region, just like `ready`.
+Do not put secrets in its configuration, which is stored with the image. Both the CLI
+and the image's server binary must support validation.
 
 ## Check release status
 

@@ -14,26 +14,27 @@ pub(crate) fn build_run_payload(
     build_payload(command, args, environment, region, "run")
 }
 
-pub(crate) fn build_ready_payload(
+pub(crate) fn build_image_hook_payload(
     command: &str,
     args: &[String],
     environment: BTreeMap<String, String>,
     region: &str,
+    hook: &str,
 ) -> Result<String, ClankerError> {
     if command.trim().is_empty() {
-        return Err(ClankerError::InvalidConfig(
-            "microvm.image.hooks.ready.command executable cannot be empty".into(),
-        ));
+        return Err(ClankerError::InvalidConfig(format!(
+            "microvm.image.hooks.{hook}.command executable cannot be empty"
+        )));
     }
     if environment
         .iter()
         .any(|(key, value)| key.contains('\0') || value.contains('\0'))
     {
-        return Err(ClankerError::InvalidConfig(
-            "ready environment contains NUL bytes".into(),
-        ));
+        return Err(ClankerError::InvalidConfig(format!(
+            "{hook} environment contains NUL bytes"
+        )));
     }
-    build_payload(command, args, environment, region, "ready")
+    build_payload(command, args, environment, region, hook)
 }
 
 fn build_payload(

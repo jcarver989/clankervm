@@ -352,12 +352,17 @@ fn push_waits_for_the_exact_version_to_become_active() {
 }
 
 #[test]
-fn push_sends_ready_initialization_on_create_update_and_removal() {
-    for (existing, configured) in [(false, true), (true, true), (true, false)] {
+fn push_sends_image_hook_commands_on_create_update_and_removal() {
+    for (existing, configured, override_timeout) in [
+        (false, true, false),
+        (true, true, true),
+        (true, false, false),
+    ] {
         let directory = TempDir::new().unwrap();
         let mut config = FULL_CONFIG.to_owned();
+        config.push_str("\n[microvm.image.hooks]\nvalidate-timeout = '7m'\n");
         if configured {
-            config.push_str("\n[microvm.image.hooks.ready]\ncommand = ['echo', 'hello world']\nenvironment = ['WORKSPACE=/workspace/repo']\n");
+            config.push_str("\n[microvm.image.hooks.ready]\ncommand = ['echo', 'hello world']\nenvironment = ['WORKSPACE=/workspace/repo']\n[microvm.image.hooks.validate]\ncommand = ['echo', 'validate workspace']\nenvironment = ['WORKSPACE=/workspace/repo']\n");
         }
         write_config(directory.path(), &config);
         fs::write(directory.path().join("Dockerfile"), "FROM scratch\n").unwrap();
@@ -373,11 +378,11 @@ fn push_sends_ready_initialization_on_create_update_and_removal() {
             Response::ok(IMAGE_CREATED),
             Response::ok(VERSION_ACTIVE),
         ]);
-        run_json(
-            directory.path(),
-            &["--format", "json", "push", "--timeout", "5s"],
-            &fake.url(),
-        );
+        let mut args = vec!["--format", "json", "push", "--timeout", "5s"];
+        if override_timeout {
+            args.extend(["--validate-timeout-seconds", "600"]);
+        }
+        run_json(directory.path(), &args, &fake.url());
         let requests = fake.finish();
         let request = &requests[2];
         let method = if existing { "PUT " } else { "POST " };
@@ -394,7 +399,29 @@ fn push_sends_ready_initialization_on_create_update_and_removal() {
             assert_eq!(payload["args"], serde_json::json!(["hello world"]));
             assert_eq!(payload["environment"]["WORKSPACE"], "/workspace/repo");
             assert_eq!(payload["environment"]["AWS_REGION"], "us-east-1");
+            let validate: Value = serde_json::from_str(
+                body["environmentVariables"]["CLANKERVM_VALIDATE_HOOK_PAYLOAD"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(validate["command"], "echo");
+            assert_eq!(validate["args"], serde_json::json!(["validate workspace"]));
+            assert_eq!(validate["environment"]["WORKSPACE"], "/workspace/repo");
+            assert_eq!(validate["environment"]["AWS_REGION"], "us-east-1");
+            assert_eq!(validate["environment"]["AWS_DEFAULT_REGION"], "us-east-1");
+            assert_eq!(body["hooks"]["microvmImageHooks"]["validate"], "ENABLED");
+            assert_eq!(
+                body["hooks"]["microvmImageHooks"]["validateTimeoutInSeconds"],
+                if override_timeout { 600 } else { 420 }
+            );
         } else {
+            assert_eq!(body["hooks"]["microvmImageHooks"]["validate"], "DISABLED");
+            assert!(
+                body["hooks"]["microvmImageHooks"]
+                    .get("validateTimeoutInSeconds")
+                    .is_none()
+            );
             assert_eq!(body["environmentVariables"], serde_json::json!({}));
         }
     }

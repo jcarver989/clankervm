@@ -61,6 +61,8 @@ pub struct PushSettings {
     pub port: Option<i32>,
     #[arg(long)]
     pub ready_timeout_seconds: Option<i32>,
+    #[arg(long, value_parser = clap::value_parser!(i32).range(1..=3600))]
+    pub validate_timeout_seconds: Option<i32>,
     #[arg(long)]
     pub run_timeout_seconds: Option<i32>,
     #[arg(long)]
@@ -88,6 +90,14 @@ impl Settings for PushSettings {
         validate_non_empty(self.build_role_arn.as_deref(), "microvm.image.iam-role")?;
         validate_non_empty(self.base_image.as_deref(), "microvm.image.base-image")?;
         validate_non_empty(self.egress.as_deref(), "microvm.image.network.egress")?;
+        if self
+            .validate_timeout_seconds
+            .is_some_and(|seconds| !(1..=3600).contains(&seconds))
+        {
+            return Err(ClankerError::InvalidConfig(
+                "microvm.image.hooks.validate-timeout must be between 1s and 1h".into(),
+            ));
+        }
         self.tags()?;
         self.capabilities()?;
         Ok(())
@@ -141,6 +151,9 @@ impl PushSettings {
     pub(crate) fn ready_timeout_seconds(&self) -> i32 {
         self.ready_timeout_seconds
             .unwrap_or(DEFAULT_READY_TIMEOUT_SECONDS)
+    }
+    pub(crate) fn validate_timeout_seconds(&self) -> i32 {
+        self.validate_timeout_seconds.unwrap_or(300)
     }
     pub(crate) fn run_timeout_seconds(&self) -> i32 {
         self.run_timeout_seconds
