@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::client::ClientRequestBuilder;
 use tokio_tungstenite::tungstenite::http::{StatusCode, Uri};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
 /// The path AWS exposes a MicroVM's pty on.
 const SHELL_PATH: &str = "/shell";
@@ -16,7 +16,9 @@ const SHELL_PATH: &str = "/shell";
 pub(crate) async fn connect(
     request: ClientRequestBuilder,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, ShellError> {
-    let (stream, _) = connect_async(request).await.map_err(classify)?;
+    let (stream, _) = connect_async_with_config(request, None, true)
+        .await
+        .map_err(classify)?;
     Ok(stream)
 }
 
@@ -121,6 +123,25 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    #[tokio::test]
+    async fn shell_connections_disable_nagle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/shell", listener.local_addr().unwrap());
+        let server = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(socket).await.unwrap()
+        };
+        let (client, _server) = tokio::join!(
+            connect(ClientRequestBuilder::new(url.parse().unwrap())),
+            server
+        );
+        let client = client.unwrap();
+        let MaybeTlsStream::Plain(socket) = client.get_ref() else {
+            panic!("loopback connection should not use TLS");
+        };
+        assert!(socket.nodelay().unwrap());
+    }
 
     #[test]
     fn an_endpoint_becomes_the_shell_url() {
