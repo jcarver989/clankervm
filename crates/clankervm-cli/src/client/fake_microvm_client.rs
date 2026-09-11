@@ -1,7 +1,7 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogPage, LogQuery, MicroVmClient, MicroVmPage,
-    Observation, Published, artifact_key,
+    ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogPage, LogQuery, MicroVmClient,
+    MicroVmDetails, MicroVmPage, Observation, Published, ShellToken,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
@@ -23,6 +23,9 @@ pub(crate) enum Call {
     Launch(LaunchSpec),
     LogStreams(String),
     LogEvents(LogQuery),
+    Describe(String),
+    ShellToken(String),
+    Terminate(String),
 }
 
 /// An in-memory [`MicroVmClient`] that answers scripted responses in order,
@@ -41,6 +44,9 @@ struct State {
     launched: VecDeque<Result<Launch, MicroVmClientError>>,
     streams: VecDeque<Result<Vec<String>, MicroVmClientError>>,
     events: VecDeque<Result<LogPage, MicroVmClientError>>,
+    described: VecDeque<Result<Option<MicroVmDetails>, MicroVmClientError>>,
+    shell_tokens: VecDeque<Result<ShellToken, MicroVmClientError>>,
+    terminated: VecDeque<Result<(), MicroVmClientError>>,
     delay: Option<Duration>,
     calls: Vec<Call>,
 }
@@ -102,6 +108,30 @@ impl FakeMicroVmClient {
         self
     }
 
+    pub(crate) fn described(
+        self,
+        responses: impl IntoIterator<Item = Result<Option<MicroVmDetails>, MicroVmClientError>>,
+    ) -> Self {
+        self.lock().described = responses.into_iter().collect();
+        self
+    }
+
+    pub(crate) fn shell_tokens(
+        self,
+        responses: impl IntoIterator<Item = Result<ShellToken, MicroVmClientError>>,
+    ) -> Self {
+        self.lock().shell_tokens = responses.into_iter().collect();
+        self
+    }
+
+    pub(crate) fn terminated(
+        self,
+        responses: impl IntoIterator<Item = Result<(), MicroVmClientError>>,
+    ) -> Self {
+        self.lock().terminated = responses.into_iter().collect();
+        self
+    }
+
     /// Makes every call take `delay` to answer, so deadlines can be tested.
     pub(crate) fn with_delay(self, delay: Duration) -> Self {
         self.lock().delay = Some(delay);
@@ -150,7 +180,7 @@ impl MicroVmClient for FakeMicroVmClient {
                     artifact_uri: format!(
                         "s3://{}/{}",
                         spec.bucket,
-                        artifact_key(&spec.name, &bundle.digest)
+                        spec.artifact_key(&bundle.digest)
                     ),
                 })
             },
@@ -226,6 +256,42 @@ impl MicroVmClient for FakeMicroVmClient {
             Call::LogEvents(query.clone()),
             |state| state.events.pop_front(),
             || Ok(LogPage::default()),
+        )
+        .await
+    }
+
+    async fn describe(
+        &self,
+        microvm_id: &str,
+    ) -> Result<Option<MicroVmDetails>, MicroVmClientError> {
+        self.answer(
+            Call::Describe(microvm_id.to_owned()),
+            |state| state.described.pop_front(),
+            || Ok(None),
+        )
+        .await
+    }
+
+    async fn shell_token(&self, microvm_id: &str) -> Result<ShellToken, MicroVmClientError> {
+        self.answer(
+            Call::ShellToken(microvm_id.to_owned()),
+            |state| state.shell_tokens.pop_front(),
+            || {
+                Ok(ShellToken {
+                    headers: [("X-aws-proxy-auth".into(), "fake-token".into())]
+                        .into_iter()
+                        .collect(),
+                })
+            },
+        )
+        .await
+    }
+
+    async fn terminate(&self, microvm_id: &str) -> Result<(), MicroVmClientError> {
+        self.answer(
+            Call::Terminate(microvm_id.to_owned()),
+            |state| state.terminated.pop_front(),
+            || Ok(()),
         )
         .await
     }

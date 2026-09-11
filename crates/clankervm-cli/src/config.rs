@@ -121,6 +121,7 @@ impl ProjectConfig {
             arn: self.image_arn(&role)?,
             name: self.image.name.clone(),
             bucket: settings.artifact_bucket()?.to_owned(),
+            artifact_prefix: settings.artifact_prefix().to_owned(),
             tags: settings.tags()?,
             configuration: ImageConfiguration {
                 base_image_arn: Arn::lambda(region, "aws", "microvm-image", settings.base_image())?,

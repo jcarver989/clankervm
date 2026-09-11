@@ -1,6 +1,6 @@
 //! Shared fixtures for the crate's own tests.
 
-use crate::client::{LogEvent, MicroVmSummary, Observation};
+use crate::client::{LogEvent, MicroVmDetails, MicroVmSummary, Observation};
 use crate::config::ProjectConfig;
 use aws_sdk_lambdamicrovms::types::{
     MicrovmImageState, MicrovmImageVersionState, MicrovmImageVersionStatus, MicrovmState,
@@ -14,6 +14,13 @@ pub(crate) const ROLE: &str = "execution-role-arn = \"arn:aws:iam::123456789012:
 
 /// The image ARN the shared fixtures report.
 pub(crate) const IMAGE_ARN: &str = "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo";
+
+/// The endpoint a fake MicroVM's pty is reachable at.
+pub(crate) const ENDPOINT: &str = "https://example.test";
+
+/// The ingress connector that exposes a MicroVM's pty.
+pub(crate) const SHELL_CONNECTOR_ARN: &str =
+    "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:SHELL_INGRESS";
 
 pub(crate) fn active(version: &str) -> Observation {
     observation(
@@ -97,6 +104,54 @@ impl MicroVmSummaryBuilder {
 
     pub(crate) fn build(self) -> MicroVmSummary {
         self.summary
+    }
+}
+
+/// Builds a [`MicroVmDetails`] with predictable defaults: a running MicroVM
+/// whose pty is exposed at [`ENDPOINT`].
+pub(crate) struct MicroVmDetailsBuilder {
+    details: MicroVmDetails,
+}
+
+impl MicroVmDetailsBuilder {
+    pub(crate) fn new(microvm_id: &str) -> Self {
+        Self {
+            details: MicroVmDetails {
+                microvm_id: microvm_id.into(),
+                state: MicrovmState::Running,
+                state_reason: None,
+                endpoint: ENDPOINT.into(),
+                ingress_network_connectors: vec![SHELL_CONNECTOR_ARN.into()],
+            },
+        }
+    }
+
+    pub(crate) fn state(mut self, state: MicrovmState) -> Self {
+        self.details.state = state;
+        self
+    }
+
+    pub(crate) fn state_reason(mut self, reason: &str) -> Self {
+        self.details.state_reason = Some(reason.into());
+        self
+    }
+
+    pub(crate) fn endpoint(mut self, endpoint: &str) -> Self {
+        self.details.endpoint = endpoint.into();
+        self
+    }
+
+    pub(crate) fn ingress_network_connectors(
+        mut self,
+        connectors: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.details.ingress_network_connectors =
+            connectors.into_iter().map(str::to_owned).collect();
+        self
+    }
+
+    pub(crate) fn build(self) -> MicroVmDetails {
+        self.details
     }
 }
 

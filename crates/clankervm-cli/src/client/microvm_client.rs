@@ -8,7 +8,10 @@ use aws_sdk_lambdamicrovms::types::{
 };
 use aws_smithy_types::DateTime;
 use serde::{Serialize, Serializer};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+
+/// The ingress connector that makes AWS expose a MicroVM's pty.
+pub(crate) const SHELL_INGRESS: &str = "SHELL_INGRESS";
 
 /// Everything AWS needs to build one image version, in AWS terms.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,8 +31,23 @@ pub(crate) struct ImageSpec {
     pub arn: Arn,
     pub name: String,
     pub bucket: String,
+    /// The S3 key prefix bundles are uploaded under, without a trailing slash.
+    pub artifact_prefix: String,
     pub tags: BTreeMap<String, String>,
     pub configuration: ImageConfiguration,
+}
+
+impl ImageSpec {
+    /// The content-addressed object key of a published bundle.
+    ///
+    /// The prefix is configurable because an image's build role is often scoped
+    /// to a key prefix that predates ClankerVM.
+    pub(crate) fn artifact_key(&self, digest: &str) -> String {
+        format!(
+            "{}/{}/bundles/{digest}.zip",
+            self.artifact_prefix, self.name
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -223,6 +241,26 @@ where
 
 pub(crate) type MicroVmPage = (Vec<MicroVmSummary>, Option<String>);
 
+/// One MicroVM as `GetMicrovm` describes it, in the terms `shell` needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MicroVmDetails {
+    pub microvm_id: String,
+    pub state: MicrovmState,
+    pub state_reason: Option<String>,
+    /// The host the MicroVM's pty is reachable at.
+    pub endpoint: String,
+    pub ingress_network_connectors: Vec<String>,
+}
+
+/// The handshake headers a MicroVM's `/shell` endpoint authenticates with.
+///
+/// Deliberately not `Debug`: the headers carry a bearer token that must never
+/// reach a log line or an error message.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ShellToken {
+    pub headers: HashMap<String, String>,
+}
+
 /// An image name or ARN accepted by AWS `image_identifier`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ImageIdentifier {
@@ -294,9 +332,16 @@ pub(crate) trait MicroVmClient: Send + Sync {
 
     /// One page of events from one stream, oldest first.
     async fn log_events(&self, query: &LogQuery) -> Result<LogPage, MicroVmClientError>;
-}
 
-/// The content-addressed object key of a published bundle.
-pub(crate) fn artifact_key(name: &str, digest: &str) -> String {
-    format!("clankervm/{name}/bundles/{digest}.zip")
+    /// The current description of one MicroVM, or `None` when it is gone.
+    async fn describe(
+        &self,
+        microvm_id: &str,
+    ) -> Result<Option<MicroVmDetails>, MicroVmClientError>;
+
+    /// A token that authenticates a `/shell` handshake.
+    async fn shell_token(&self, microvm_id: &str) -> Result<ShellToken, MicroVmClientError>;
+
+    /// Stops one MicroVM; a MicroVM that is already gone is not an error.
+    async fn terminate(&self, microvm_id: &str) -> Result<(), MicroVmClientError>;
 }

@@ -13,7 +13,7 @@ const DEFAULT_INGRESS: &str = "NO_INGRESS";
 const DEFAULT_RUN_EGRESS: &str = "INTERNET_EGRESS";
 const DEFAULT_MAX_DURATION: i32 = 3600;
 
-#[derive(Debug, Default, Args)]
+#[derive(Clone, Debug, Default, Args)]
 pub struct RunOptions {
     #[arg(last = true, allow_hyphen_values = true)]
     pub arguments: Vec<String>,
@@ -128,6 +128,13 @@ pub(super) async fn execute<T: MicroVmClient>(
     })
 }
 
+#[derive(Debug)]
+pub(crate) struct LaunchPlan {
+    pub spec: LaunchSpec,
+    pub image_name: String,
+    pub log_group: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunResult {
@@ -143,6 +150,20 @@ pub async fn run<T: MicroVmClient>(
     config: &ProjectConfig,
     client: &T,
 ) -> Result<RunResult, ClankerError> {
+    let plan = plan_launch(cli, config)?;
+    let launched = client.launch(&plan.spec).await?;
+    Ok(RunResult {
+        microvm_id: launched.microvm_id,
+        image_version: launched.image_version,
+        log_group: plan.log_group,
+        image_name: plan.image_name,
+    })
+}
+
+pub(crate) fn plan_launch(
+    cli: &RunOptions,
+    config: &ProjectConfig,
+) -> Result<LaunchPlan, ClankerError> {
     let settings = config.run.merge(&cli.settings)?;
     let execution_role_arn = Arn::parse(settings.execution_role_arn()?)?;
     let target = config.target(cli.release.as_deref(), config.account_role(&settings)?)?;
@@ -159,12 +180,10 @@ pub async fn run<T: MicroVmClient>(
         client_token: cli.client_token.clone(),
         cloudwatch_log_group: settings.log_group.clone(),
     };
-    let launched = client.launch(&spec).await?;
-    Ok(RunResult {
-        microvm_id: launched.microvm_id,
-        image_version: launched.image_version,
-        log_group: settings.log_group,
+    Ok(LaunchPlan {
+        spec,
         image_name: target.name,
+        log_group: settings.log_group,
     })
 }
 

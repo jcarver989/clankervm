@@ -6,6 +6,7 @@ mod config;
 mod output;
 mod payload;
 mod release;
+mod shell;
 #[cfg(test)]
 mod test_support;
 mod util;
@@ -17,6 +18,7 @@ use thiserror::Error;
 
 pub use client::MicroVmClientError;
 pub use commands::{Command, execute};
+pub use shell::ShellError;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -101,6 +103,30 @@ pub enum ClankerError {
     AlreadyInitialized(PathBuf),
     #[error("failed to serialize output: {0}")]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Shell(#[from] shell::ShellError),
+    #[error(
+        "`clankervm shell` needs an interactive terminal; run it from a terminal, not from a pipe or a script"
+    )]
+    NotATerminal,
+    #[error("MicroVM `{0}` does not exist")]
+    MicroVmNotFound(String),
+    #[error(
+        "MicroVM `{microvm_id}` is {state}, not RUNNING{}",
+        reason.as_deref().map_or(String::new(), |reason| format!(" ({reason})"))
+    )]
+    MicroVmNotRunning {
+        microvm_id: String,
+        state: String,
+        reason: Option<String>,
+    },
+    #[error("timed out after {timeout:?} waiting for MicroVM `{microvm_id}`")]
+    MicroVmWaitTimeout {
+        microvm_id: String,
+        timeout: Duration,
+    },
+    #[error("MicroVM `{0}` was not confirmed terminated; check it with `clankervm list`")]
+    MicroVmTerminationUnconfirmed(String),
 }
 
 /// How many stream names an error names before it stops listing them.

@@ -19,6 +19,7 @@ const DEFAULT_PORT: i32 = 9000;
 const DEFAULT_READY_TIMEOUT_SECONDS: i32 = 300;
 const DEFAULT_RUN_TIMEOUT_SECONDS: i32 = 60;
 const DEFAULT_TERMINATE_TIMEOUT_SECONDS: i32 = 30;
+const DEFAULT_ARTIFACT_PREFIX: &str = "clankervm";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Default, Args)]
@@ -38,6 +39,8 @@ pub struct PushSettings {
     pub context: Option<PathBuf>,
     #[arg(long)]
     pub artifact_bucket: Option<String>,
+    #[arg(long)]
+    pub artifact_prefix: Option<String>,
     #[arg(long)]
     pub build_role_arn: Option<String>,
     #[arg(long)]
@@ -70,6 +73,12 @@ pub struct PushSettings {
 impl Settings for PushSettings {
     fn validate(&self) -> Result<(), ClankerError> {
         validate_non_empty(self.artifact_bucket.as_deref(), "push.artifact-bucket")?;
+        validate_non_empty(self.artifact_prefix.as_deref(), "push.artifact-prefix")?;
+        if self.artifact_prefix().is_empty() {
+            return Err(ClankerError::InvalidConfig(
+                "push.artifact-prefix must name at least one key segment".into(),
+            ));
+        }
         validate_non_empty(self.build_role_arn.as_deref(), "push.build-role-arn")?;
         validate_non_empty(self.base_image.as_deref(), "push.base-image")?;
         validate_non_empty(self.egress.as_deref(), "push.egress")?;
@@ -82,6 +91,14 @@ impl Settings for PushSettings {
 impl PushSettings {
     pub(crate) fn artifact_bucket(&self) -> Result<&str, ClankerError> {
         required(self.artifact_bucket.as_deref(), "push.artifact-bucket")
+    }
+
+    /// The key prefix bundles are uploaded under, without a trailing slash.
+    pub(crate) fn artifact_prefix(&self) -> &str {
+        self.artifact_prefix
+            .as_deref()
+            .unwrap_or(DEFAULT_ARTIFACT_PREFIX)
+            .trim_end_matches('/')
     }
 
     pub(crate) fn build_role_arn(&self) -> Result<&str, ClankerError> {
@@ -212,6 +229,7 @@ mod tests {
         assert_eq!(settings.base_image(), DEFAULT_BASE_IMAGE);
         assert_eq!(settings.egress(), DEFAULT_BUILD_EGRESS);
         assert_eq!(settings.port(), DEFAULT_PORT);
+        assert_eq!(settings.artifact_prefix(), DEFAULT_ARTIFACT_PREFIX);
         assert_eq!(settings.timeout(), DEFAULT_TIMEOUT);
     }
 
@@ -224,6 +242,14 @@ mod tests {
             },
             PushSettings {
                 base_image: Some(" ".into()),
+                ..PushSettings::default()
+            },
+            PushSettings {
+                artifact_prefix: Some(String::new()),
+                ..PushSettings::default()
+            },
+            PushSettings {
+                artifact_prefix: Some("/".into()),
                 ..PushSettings::default()
             },
             PushSettings {
@@ -303,6 +329,31 @@ mod tests {
         assert_eq!(
             spec.configuration.description,
             format!("Bundle {}", crate::util::sha256_hex(&expected))
+        );
+    }
+
+    #[tokio::test]
+    async fn push_uploads_under_the_configured_artifact_prefix() {
+        let directory = TempDir::new().unwrap();
+        fs::write(directory.path().join("app.py"), "print('hi')").unwrap();
+        let config = test_support::project(
+            directory.path(),
+            "[push]\nartifact-bucket = \"artifacts\"\nbuild-role-arn = \"arn:aws:iam::123456789012:role/build\"\nartifact-prefix = \"employee-clanker/\"\n",
+        );
+        let client = active_client();
+
+        push(&PushOptions::default(), &config, &client, |_| {})
+            .await
+            .unwrap();
+
+        let calls = client.calls();
+        let Call::Publish(spec) = &calls[0] else {
+            panic!("expected publish, got {calls:?}");
+        };
+        assert_eq!(spec.artifact_prefix, "employee-clanker");
+        assert_eq!(
+            spec.artifact_key("abc"),
+            "employee-clanker/demo/bundles/abc.zip"
         );
     }
 

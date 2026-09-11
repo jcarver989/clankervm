@@ -3,6 +3,7 @@ mod list;
 mod logs;
 mod push;
 mod run;
+mod shell;
 mod status;
 
 use crate::client::AwsMicroVmClient;
@@ -18,6 +19,7 @@ pub use push::PushOptions;
 pub(crate) use push::PushSettings;
 pub use run::RunOptions;
 pub(crate) use run::RunSettings;
+pub use shell::ShellOptions;
 pub use status::StatusOptions;
 pub(crate) use status::StatusSettings;
 
@@ -35,11 +37,18 @@ pub enum Command {
     Run(RunOptions),
     /// Read the logs of a MicroVM.
     Logs(LogsOptions),
+    /// Attach a terminal to a MicroVM's pty, launching one if needed.
+    Shell(ShellOptions),
 }
 
 pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
     if let Command::Init(args) = &cli.command {
         return init::execute(args, &cli.config, cli.format);
+    }
+
+    if let Command::Shell(_) = &cli.command {
+        // `shell` needs a terminal before it needs a project or credentials.
+        shell::preflight(cli.format)?;
     }
 
     let config = ProjectConfig::load(&cli.config, cli.region)?;
@@ -59,6 +68,7 @@ pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
         Command::List(options) => list::execute(options, &config, cli.format, &client).await,
         Command::Run(options) => run::execute(options, &config, cli.format, &client).await,
         Command::Logs(options) => logs::execute(options, &config, cli.format, &client).await,
+        Command::Shell(options) => Box::pin(shell::execute(options, &config, &client)).await,
         Command::Init(_) => unreachable!("init returns before project setup"),
     }
 }

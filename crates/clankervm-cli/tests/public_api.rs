@@ -38,11 +38,101 @@ fn help_exposes_release_workflow() {
     let output = run_cli(Path::new("."), &["--help"], "");
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    for command in ["init", "push", "status", "list", "run", "logs"] {
+    for command in ["init", "push", "status", "list", "run", "logs", "shell"] {
         assert!(text.contains(command), "missing {command} in {text}");
     }
     for removed in ["  bundle", "  wait"] {
         assert!(!text.contains(removed), "unexpected {removed} in {text}");
+    }
+}
+
+#[test]
+fn shell_attaches_or_launches() {
+    let ClankerCommand::Shell(shell) = parse(&["shell"]) else {
+        panic!("expected shell command");
+    };
+    assert!(shell.microvm_id.is_none());
+    assert!(!shell.keep);
+    assert_eq!(shell.timeout, std::time::Duration::from_mins(5));
+    assert!(shell.run.arguments.is_empty());
+    assert!(shell.run.release.is_none());
+    assert!(shell.run.settings.ingress.is_none());
+
+    let ClankerCommand::Shell(shell) = parse(&["shell", "microvm-1", "--timeout", "10m"]) else {
+        panic!("expected shell command");
+    };
+    assert_eq!(shell.microvm_id.as_deref(), Some("microvm-1"));
+    assert_eq!(shell.timeout, std::time::Duration::from_mins(10));
+
+    let ClankerCommand::Shell(shell) = parse(&[
+        "shell",
+        "--keep",
+        "--timeout",
+        "30s",
+        "--",
+        "sleep",
+        "infinity",
+    ]) else {
+        panic!("expected shell command");
+    };
+    assert!(shell.keep);
+    assert_eq!(shell.timeout, std::time::Duration::from_secs(30));
+    assert_eq!(shell.run.arguments, ["sleep", "infinity"]);
+
+    // Attaching to an existing MicroVM leaves nothing to launch.
+    for rejected in [
+        ["shell", "microvm-1", "--keep"].as_slice(),
+        &["shell", "microvm-1", "--max-duration", "60"],
+        &["shell", "microvm-1", "--release", "my-runner@1"],
+        &["shell", "microvm-1", "--", "htop"],
+    ] {
+        let arguments = std::iter::once("clankervm").chain(rejected.iter().copied());
+        assert!(
+            Cli::try_parse_from(arguments).is_err(),
+            "accepted {rejected:?}"
+        );
+    }
+}
+
+#[test]
+fn shell_needs_a_terminal_before_it_reaches_the_project() {
+    let directory = TempDir::new().unwrap();
+
+    let output = run_cli(
+        directory.path(),
+        &["shell", "microvm-1"],
+        "http://127.0.0.1:1",
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("interactive terminal"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn shell_rejects_json_before_project_or_credential_setup() {
+    let directory = TempDir::new().unwrap();
+    for arguments in [
+        vec!["--format", "json", "shell"],
+        vec!["--format", "json", "shell", "microvm-1"],
+    ] {
+        let output = run_cli(directory.path(), &arguments, "http://127.0.0.1:1");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("cannot be combined with --format json"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 

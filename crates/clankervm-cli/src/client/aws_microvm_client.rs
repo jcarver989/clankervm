@@ -1,17 +1,19 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
     ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogEvent, LogPage, LogQuery, MicroVmClient,
-    MicroVmSummary, Observation, Published, artifact_key,
+    MicroVmDetails, MicroVmSummary, Observation, Published, ShellToken,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
 use aws_config::SdkConfig;
 use aws_sdk_cloudwatchlogs::types::OutputLogEvent;
 use aws_sdk_lambdamicrovms::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_lambdamicrovms::operation::get_microvm::GetMicrovmError;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image::GetMicrovmImageError;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image::GetMicrovmImageOutput;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image_version::GetMicrovmImageVersionError;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image_version::GetMicrovmImageVersionOutput;
+use aws_sdk_lambdamicrovms::operation::terminate_microvm::TerminateMicrovmError;
 use aws_sdk_lambdamicrovms::types::{
     CloudWatchLogging, CodeArtifact, Logging, MicrovmImageVersionState, MicrovmImageVersionStatus,
 };
@@ -22,6 +24,8 @@ use std::future::Future;
 
 /// MicroVMs requested per listing page.
 const LIST_PAGE_SIZE: i32 = 50;
+/// How long a shell token stays valid; it only has to outlive the handshake.
+const SHELL_TOKEN_MINUTES: i32 = 5;
 /// Log streams requested per page; a page is all the `logs` hint needs.
 const STREAMS_PAGE_SIZE: i32 = 50;
 /// Events one read may ask for.
@@ -50,7 +54,7 @@ impl AwsMicroVmClient {
         spec: &ImageSpec,
         bundle: &Artifact,
     ) -> Result<String, MicroVmClientError> {
-        let key = artifact_key(&spec.name, &bundle.digest);
+        let key = spec.artifact_key(&bundle.digest);
         self.s3
             .put_object()
             .bucket(&spec.bucket)
@@ -370,6 +374,62 @@ impl MicroVmClient for AwsMicroVmClient {
                 .then(|| output.next_forward_token().map(str::to_owned))
                 .flatten(),
         })
+    }
+
+    async fn describe(
+        &self,
+        microvm_id: &str,
+    ) -> Result<Option<MicroVmDetails>, MicroVmClientError> {
+        let output = self
+            .optional(
+                "get MicroVM",
+                self.microvms
+                    .get_microvm()
+                    .microvm_identifier(microvm_id)
+                    .send(),
+                GetMicrovmError::is_resource_not_found_exception,
+            )
+            .await?;
+        Ok(output.map(|output| MicroVmDetails {
+            microvm_id: output.microvm_id,
+            state: output.state,
+            state_reason: output.state_reason,
+            endpoint: output.endpoint,
+            ingress_network_connectors: output.ingress_network_connectors.unwrap_or_default(),
+        }))
+    }
+
+    async fn shell_token(&self, microvm_id: &str) -> Result<ShellToken, MicroVmClientError> {
+        let output = self
+            .microvms
+            .create_microvm_shell_auth_token()
+            .microvm_identifier(microvm_id)
+            .expiration_in_minutes(SHELL_TOKEN_MINUTES)
+            .send()
+            .await
+            .map_err(|error| MicroVmClientError::service("create shell auth token", &error))?;
+        if output.auth_token.is_empty() {
+            return Err(MicroVmClientError::Service {
+                operation: "create shell auth token",
+                message: "AWS returned no token".into(),
+            });
+        }
+        Ok(ShellToken {
+            headers: output.auth_token,
+        })
+    }
+
+    async fn terminate(&self, microvm_id: &str) -> Result<(), MicroVmClientError> {
+        self.optional(
+            "terminate MicroVM",
+            self.microvms
+                .terminate_microvm()
+                .microvm_identifier(microvm_id)
+                .send(),
+            TerminateMicrovmError::is_resource_not_found_exception,
+        )
+        .await
+        .map(|_| ())
     }
 }
 
