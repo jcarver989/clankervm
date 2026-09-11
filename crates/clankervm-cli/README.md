@@ -1,6 +1,6 @@
 # ClankerVM CLI
 
-`clankervm` bundles, releases, inspects, and runs AWS Lambda MicroVM applications.
+`clankervm` bundles, releases, inspects, runs, and reads the logs of AWS Lambda MicroVM applications.
 
 ## Quick start
 
@@ -46,6 +46,12 @@ timeout = "1h"
 [status]
 timeout = "1h"
 
+[logs]
+log-group = "/my-runner/microvms"
+since = "30m"
+limit = 500
+timeout = "1m"
+
 [run]
 command = ["/usr/local/bin/my-job", "--job-id", "42"]
 environment = ["LOG_LEVEL=info", "DRY_RUN=false"]
@@ -64,7 +70,7 @@ clankervm push --context image --base-image al2023-1 \
   --tag imageName=my-runner --tag team=platform
 ```
 
-For every setting, command-line values take precedence over TOML values, which take precedence over built-in defaults. The positional `push PATH` is intentionally invocation-only and supplies a directory or existing ZIP instead of `[push].context`. Tags must be `key=value`; malformed and duplicate tag keys are rejected. Unknown configuration fields are rejected.
+For every setting, command-line values take precedence over TOML values, which take precedence over built-in defaults. The positional `push PATH` is intentionally invocation-only and supplies a directory or existing ZIP instead of `[push].context`. Tags must be `key=value`; malformed and duplicate tag keys are rejected. Unknown configuration fields are rejected. The `[logs]` table has matching `--log-group`, `--log-stream`, `--since`, `--limit` and `--timeout` flags.
 
 For multiple images, keep each deployment unit explicit:
 
@@ -136,6 +142,35 @@ clankervm run --release my-runner@42 --client-token "$RUN_ID" --env LOG_LEVEL=de
 
 Run flags mirror `[run]` keys, including `--max-duration` and `max-duration`. `run.command` provides a default executable and arguments; a command passed after `--` takes precedence. `run.environment` accepts `key=value` entries and repeatable `--env key=value` flags override the configured environment. Empty values are supported, malformed or duplicate keys are rejected, and `AWS_REGION` plus `AWS_DEFAULT_REGION` are set from `image.region`. A command is required from TOML or the CLI, and the complete payload shares AWS's 4096-byte run-hook limit.
 
+## Logs
+
+`logs` reads the CloudWatch Logs of one MicroVM: the application's standard output and error, plus the hook server's own messages. It needs only the MicroVM id that `run` or `list` reports, and makes no MicroVM API call.
+
+```sh
+clankervm logs microvm-0099
+clankervm logs microvm-0099 --follow
+clankervm logs microvm-0099 --since 30m --limit 500
+clankervm logs microvm-0099 --log-group /my-runner/microvms --log-stream custom
+clankervm --format json logs microvm-0099
+```
+
+AWS streams a MicroVM's logs to the group `run` configures, or, without a configured group, to `/aws/lambda-microvms/<image-name>`, which also holds the build logs. The stream is named after the MicroVM id unless the launch named another one. `logs` resolves the group in this order: `--log-group`, `[logs].log-group`, `[run].log-group` (the group this project's `run` writes to), and `/aws/lambda-microvms/<image-name>`. It resolves the stream from `--log-stream`, `[logs].log-stream`, and the MicroVM id.
+
+One read takes at most `--timeout` (default `1m`) and reports at most `--limit` events (default `1000`, maximum `10000`). Without `--since`, the newest events in the stream are reported. With `--since 30m`, every event of the last half hour is read, page by page, up to the limit. Events are always reported oldest first.
+
+`--follow` reads from the oldest event in the stream and keeps printing new events every second until Ctrl-C. It reads a stream a running MicroVM may still be appending to, so it is human-only: `--follow` with `--format json` is rejected. `--raw` prints event messages without their timestamps, while following or not.
+
+Human output prints one event per line, and names the stream when there is nothing to print:
+
+```text
+2026-08-25T00:00:01Z  Hook server listening
+2026-08-25T00:00:01Z  hello from a MicroVM
+```
+
+JSON output is `{"logGroup":...,"logStream":...,"events":[{"timestamp":...,"message":...}]}` with RFC3339 UTC timestamps and an empty array when nothing matches.
+
+Reading logs needs `logs:GetLogEvents` and `logs:DescribeLogStreams` on the selected credentials. Producing them needs the MicroVM's execution role to allow `logs:CreateLogGroup`, `logs:CreateLogStream` and `logs:PutLogEvents`; without those permissions a MicroVM writes no runtime logs to read. A stream that does not exist is reported together with the streams the group does have, so a wrong `--log-stream` is obvious.
+
 ## JSON output
 
-Use `--format json` for stable JSON on stdout. Human progress is written to stderr.
+Use `--format json` for stable JSON on stdout. Human progress is written to stderr. `logs --follow` streams events to stdout for as long as it runs, one event per line, which is why it is human-only.

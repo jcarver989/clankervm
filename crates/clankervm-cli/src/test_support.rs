@@ -1,6 +1,6 @@
 //! Shared fixtures for the crate's own tests.
 
-use crate::client::{MicroVmSummary, Observation};
+use crate::client::{LogEvent, MicroVmSummary, Observation};
 use crate::config::ProjectConfig;
 use aws_sdk_lambdamicrovms::types::{
     MicrovmImageState, MicrovmImageVersionState, MicrovmImageVersionStatus, MicrovmState,
@@ -97,6 +97,31 @@ impl MicroVmSummaryBuilder {
 
     pub(crate) fn build(self) -> MicroVmSummary {
         self.summary
+    }
+}
+
+/// Builds a [`LogEvent`] with predictable defaults.
+pub(crate) struct LogEventBuilder {
+    event: LogEvent,
+}
+
+impl LogEventBuilder {
+    pub(crate) fn new(message: &str) -> Self {
+        Self {
+            event: LogEvent {
+                timestamp: DateTime::from_secs(0),
+                message: message.into(),
+            },
+        }
+    }
+
+    pub(crate) fn at(mut self, seconds: i64) -> Self {
+        self.event.timestamp = DateTime::from_secs(seconds);
+        self
+    }
+
+    pub(crate) fn build(self) -> LogEvent {
+        self.event
     }
 }
 

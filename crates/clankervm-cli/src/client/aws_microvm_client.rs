@@ -1,11 +1,12 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    ImageIdentifier, ImageSpec, Launch, LaunchSpec, MicroVmClient, MicroVmSummary, Observation,
-    Published, artifact_key,
+    ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogEvent, LogPage, LogQuery, MicroVmClient,
+    MicroVmSummary, Observation, Published, artifact_key,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
 use aws_config::SdkConfig;
+use aws_sdk_cloudwatchlogs::types::OutputLogEvent;
 use aws_sdk_lambdamicrovms::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_lambdamicrovms::operation::get_microvm_image::GetMicrovmImageError;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image::GetMicrovmImageOutput;
@@ -15,16 +16,22 @@ use aws_sdk_lambdamicrovms::types::{
     CloudWatchLogging, CodeArtifact, Logging, MicrovmImageVersionState, MicrovmImageVersionStatus,
 };
 use aws_sdk_s3::primitives::ByteStream;
+use aws_smithy_types::DateTime;
 use std::collections::HashMap;
 use std::future::Future;
 
 /// MicroVMs requested per listing page.
 const LIST_PAGE_SIZE: i32 = 50;
+/// Log streams requested per page; a page is all the `logs` hint needs.
+const STREAMS_PAGE_SIZE: i32 = 50;
+/// Events one read may ask for.
+const EVENTS_PAGE_SIZE: usize = 10_000;
 /// Image versions requested per page while pruning.
 const VERSIONS_PAGE_SIZE: i32 = 50;
 
 #[derive(Clone)]
 pub(crate) struct AwsMicroVmClient {
+    logs: aws_sdk_cloudwatchlogs::Client,
     microvms: aws_sdk_lambdamicrovms::Client,
     s3: aws_sdk_s3::Client,
 }
@@ -32,6 +39,7 @@ pub(crate) struct AwsMicroVmClient {
 impl AwsMicroVmClient {
     pub(crate) fn new(sdk: &SdkConfig) -> Self {
         Self {
+            logs: aws_sdk_cloudwatchlogs::Client::new(sdk),
             microvms: aws_sdk_lambdamicrovms::Client::new(sdk),
             s3: aws_sdk_s3::Client::new(sdk),
         }
@@ -311,8 +319,73 @@ impl MicroVmClient for AwsMicroVmClient {
             image_version: output.image_version,
         })
     }
+
+    async fn log_streams(&self, group: &str) -> Result<Vec<String>, MicroVmClientError> {
+        let page = self
+            .logs
+            .describe_log_streams()
+            .log_group_name(group)
+            .limit(STREAMS_PAGE_SIZE)
+            .send()
+            .await
+            .map_err(|error| MicroVmClientError::service("describe log streams", &error))?;
+        Ok(page
+            .log_streams()
+            .iter()
+            .filter_map(|stream| stream.log_stream_name().map(str::to_owned))
+            .collect())
+    }
+
+    async fn log_events(&self, query: &LogQuery) -> Result<LogPage, MicroVmClientError> {
+        let mut builder = self
+            .logs
+            .get_log_events()
+            .log_group_name(&query.group)
+            .log_stream_name(&query.stream)
+            .start_from_head(query.window.is_forward())
+            .limit(events_per_page(query.limit))
+            .set_next_token(query.next_token.clone());
+        if let Some(start_time) = query.window.start_time() {
+            builder = builder.start_time(start_time);
+        }
+        let output = builder
+            .send()
+            .await
+            .map_err(|error| match error.as_service_error() {
+                Some(error) if error.is_resource_not_found_exception() => {
+                    MicroVmClientError::NoLogStream {
+                        group: query.group.clone(),
+                        stream: query.stream.clone(),
+                    }
+                }
+                _ => MicroVmClientError::service("get log events", &error),
+            })?;
+        Ok(LogPage {
+            events: output.events().iter().map(log_event).collect(),
+            // A backward read ends at the newest event, so only a forward read
+            // has a token that continues from it.
+            next_token: query
+                .window
+                .is_forward()
+                .then(|| output.next_forward_token().map(str::to_owned))
+                .flatten(),
+        })
+    }
 }
 
 fn tags(spec: &ImageSpec) -> HashMap<String, String> {
     spec.tags.clone().into_iter().collect()
+}
+
+/// One event as AWS reports it, with the millisecond timestamp it stores.
+fn log_event(event: &OutputLogEvent) -> LogEvent {
+    LogEvent {
+        timestamp: DateTime::from_millis(event.timestamp().unwrap_or_default()),
+        message: event.message().unwrap_or_default().to_owned(),
+    }
+}
+
+/// Clamps a request size to the maximum the logs API accepts.
+fn events_per_page(limit: usize) -> i32 {
+    i32::try_from(limit.min(EVENTS_PAGE_SIZE)).unwrap_or(i32::MAX)
 }

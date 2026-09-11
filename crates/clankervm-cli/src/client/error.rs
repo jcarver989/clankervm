@@ -10,6 +10,8 @@ pub enum MicroVmClientError {
     },
     #[error("versions_to_keep must be at least 1")]
     InvalidVersionsToKeep,
+    #[error("no log stream `{stream}` in log group `{group}`")]
+    NoLogStream { group: String, stream: String },
 }
 
 impl MicroVmClientError {

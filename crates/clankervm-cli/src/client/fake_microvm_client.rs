@@ -1,7 +1,7 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    ImageIdentifier, ImageSpec, Launch, LaunchSpec, MicroVmClient, MicroVmPage, Observation,
-    Published, artifact_key,
+    ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogPage, LogQuery, MicroVmClient, MicroVmPage,
+    Observation, Published, artifact_key,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
@@ -21,6 +21,8 @@ pub(crate) enum Call {
         next_token: Option<String>,
     },
     Launch(LaunchSpec),
+    LogStreams(String),
+    LogEvents(LogQuery),
 }
 
 /// An in-memory [`MicroVmClient`] that answers scripted responses in order,
@@ -37,6 +39,8 @@ struct State {
     pruned: VecDeque<Result<(), MicroVmClientError>>,
     listed: VecDeque<Result<MicroVmPage, MicroVmClientError>>,
     launched: VecDeque<Result<Launch, MicroVmClientError>>,
+    streams: VecDeque<Result<Vec<String>, MicroVmClientError>>,
+    events: VecDeque<Result<LogPage, MicroVmClientError>>,
     delay: Option<Duration>,
     calls: Vec<Call>,
 }
@@ -79,6 +83,22 @@ impl FakeMicroVmClient {
         responses: impl IntoIterator<Item = Result<Launch, MicroVmClientError>>,
     ) -> Self {
         self.lock().launched = responses.into_iter().collect();
+        self
+    }
+
+    pub(crate) fn log_streams(
+        self,
+        responses: impl IntoIterator<Item = Result<Vec<String>, MicroVmClientError>>,
+    ) -> Self {
+        self.lock().streams = responses.into_iter().collect();
+        self
+    }
+
+    pub(crate) fn log_events(
+        self,
+        responses: impl IntoIterator<Item = Result<LogPage, MicroVmClientError>>,
+    ) -> Self {
+        self.lock().events = responses.into_iter().collect();
         self
     }
 
@@ -188,6 +208,24 @@ impl MicroVmClient for FakeMicroVmClient {
                     image_version: "1".into(),
                 })
             },
+        )
+        .await
+    }
+
+    async fn log_streams(&self, group: &str) -> Result<Vec<String>, MicroVmClientError> {
+        self.answer(
+            Call::LogStreams(group.to_owned()),
+            |state| state.streams.pop_front(),
+            || Ok(Vec::new()),
+        )
+        .await
+    }
+
+    async fn log_events(&self, query: &LogQuery) -> Result<LogPage, MicroVmClientError> {
+        self.answer(
+            Call::LogEvents(query.clone()),
+            |state| state.events.pop_front(),
+            || Ok(LogPage::default()),
         )
         .await
     }

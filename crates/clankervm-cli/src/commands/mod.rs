@@ -1,5 +1,6 @@
 mod init;
 mod list;
+mod logs;
 mod push;
 mod run;
 mod status;
@@ -11,6 +12,8 @@ use aws_config::{BehaviorVersion, Region};
 use clap::Subcommand;
 use init::InitArgs;
 pub use list::ListOptions;
+pub use logs::LogsOptions;
+pub(crate) use logs::LogsSettings;
 pub use push::PushOptions;
 pub(crate) use push::PushSettings;
 pub use run::RunOptions;
@@ -30,6 +33,8 @@ pub enum Command {
     List(ListOptions),
     /// Start a command in a MicroVM.
     Run(RunOptions),
+    /// Read the logs of a MicroVM.
+    Logs(LogsOptions),
 }
 
 pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
@@ -53,6 +58,7 @@ pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
         Command::Status(options) => status::execute(options, &config, cli.format, &client).await,
         Command::List(options) => list::execute(options, &config, cli.format, &client).await,
         Command::Run(options) => run::execute(options, &config, cli.format, &client).await,
+        Command::Logs(options) => logs::execute(options, &config, cli.format, &client).await,
         Command::Init(_) => unreachable!("init returns before project setup"),
     }
 }

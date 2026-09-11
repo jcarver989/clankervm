@@ -55,7 +55,14 @@ clankervm --format json list --all
 
 `run` launches the configured image with an explicit command and arguments. The run-hook payload is limited to 4096 bytes.
 
-See [`crates/clankervm-cli/README.md`](crates/clankervm-cli/README.md) for project configuration, prepared source contexts, release monitoring, MicroVM discovery, JSON output, and run options.
+`logs` reads the CloudWatch Logs of one MicroVM, optionally following them until interrupted.
+
+```sh
+clankervm logs microvm-0099
+clankervm logs microvm-0099 --follow
+```
+
+See [`crates/clankervm-cli/README.md`](crates/clankervm-cli/README.md) for project configuration, prepared source contexts, release monitoring, MicroVM discovery, MicroVM logs, JSON output, and run options.
 
 ClankerVM is under active development. The AWS Lambda MicroVM service and its API may change.
 

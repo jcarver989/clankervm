@@ -23,6 +23,7 @@ return_self_not_must_use = "allow"
 
 [workspace.dependencies]
 aws-config = { version = "1.8.18", features = ["behavior-version-latest"] }
+aws-sdk-cloudwatchlogs = "1.150.0"
 aws-sdk-lambdamicrovms = "1.6.0"
 aws-sdk-s3 = "1.144.0"
 aws-smithy-types = ">=1.4.9, <1.7.0"

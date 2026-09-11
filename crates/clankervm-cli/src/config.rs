@@ -1,7 +1,7 @@
 use crate::ClankerError;
 use crate::arn::Arn;
 use crate::client::{ImageConfiguration, ImageSpec};
-use crate::commands::{PushSettings, RunSettings, StatusSettings};
+use crate::commands::{LogsSettings, PushSettings, RunSettings, StatusSettings};
 use crate::util::{parse_release, validate_non_empty};
 use aws_sdk_lambdamicrovms::types::{HookState, Hooks, MicrovmHooks, MicrovmImageHooks, Resources};
 use serde::de::DeserializeOwned;
@@ -22,6 +22,8 @@ pub struct ProjectConfig {
     pub status: StatusSettings,
     #[serde(default)]
     pub run: RunSettings,
+    #[serde(default)]
+    pub logs: LogsSettings,
     #[serde(skip)]
     root: PathBuf,
 }
@@ -60,6 +62,7 @@ impl ProjectConfig {
         config.push.validate()?;
         config.run.validate()?;
         config.status.validate()?;
+        config.logs.validate()?;
         Ok(config)
     }
 

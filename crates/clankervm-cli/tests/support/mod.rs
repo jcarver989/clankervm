@@ -108,6 +108,13 @@ pub const MICROVMS_PAGE_TERMINATED: &str = r#"{"items":[{"microvmId":"microvm-2"
 /// A listing page with no MicroVMs.
 pub const MICROVMS_NONE: &str = r#"{"items":[]}"#;
 
+/// One page of log events for a MicroVM's stream.
+pub const LOG_EVENTS: &str = r#"{"events":[{"timestamp":1787616001000,"message":"hello from a MicroVM\n","ingestionTime":1787616001000}],"nextForwardToken":"f/1","nextBackwardToken":"b/1"}"#;
+
+/// The streams one log group holds, as `DescribeLogStreams` reports them.
+pub const LOG_STREAMS: &str =
+    r#"{"logStreams":[{"logStreamName":"job-1"},{"logStreamName":"job-2"}]}"#;
+
 /// An image as `GetMicrovmImage` reports it.
 pub const IMAGE_CREATED: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","name":"demo","state":"CREATED","latestActiveImageVersion":"2","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role","imageVersion":"2"}"#;
 /// The same image while its build is still running.

@@ -123,6 +123,62 @@ pub(crate) struct Launch {
     pub image_version: String,
 }
 
+/// One page of events read from one log stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LogPage {
+    pub events: Vec<LogEvent>,
+    /// Continues a forward read, and is unset when AWS reports no next page.
+    pub next_token: Option<String>,
+}
+
+/// One event read from a log stream.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LogEvent {
+    #[serde(serialize_with = "serialize_timestamp")]
+    pub timestamp: DateTime,
+    pub message: String,
+}
+
+/// Where a read of a stream starts and which way it goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LogWindow {
+    /// The newest events in the stream, read backwards from its end.
+    Newest,
+    /// Every event in the stream, read forwards from the oldest one.
+    Everything,
+    /// Every event at or after this instant, read forwards.
+    Since(DateTime),
+}
+
+impl LogWindow {
+    /// Whether events are read from the oldest one onwards, which is the only
+    /// direction that can be continued with a token.
+    pub(crate) fn is_forward(&self) -> bool {
+        !matches!(self, Self::Newest)
+    }
+
+    /// The instant the window starts at, in the milliseconds AWS expects.
+    pub(crate) fn start_time(&self) -> Option<i64> {
+        match self {
+            Self::Newest | Self::Everything => None,
+            Self::Since(start) => Some(start.to_millis().unwrap_or_default()),
+        }
+    }
+}
+
+/// Everything one read of one log stream needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LogQuery {
+    pub group: String,
+    pub stream: String,
+    pub window: LogWindow,
+    /// Events requested per page; AWS caps a page at 10,000 events.
+    pub limit: usize,
+    /// Continues a previous forward read, which makes AWS ignore the window.
+    pub next_token: Option<String>,
+}
+
 /// One MicroVM, as AWS discovery summarizes it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,12 +188,12 @@ pub(crate) struct MicroVmSummary {
     pub state: MicrovmState,
     pub image_arn: String,
     pub image_version: String,
-    #[serde(serialize_with = "serialize_started_at")]
+    #[serde(serialize_with = "serialize_timestamp")]
     pub started_at: DateTime,
 }
 
 /// RFC3339 UTC, for example `2026-08-25T00:00:00Z`.
-fn serialize_started_at<S: Serializer>(value: &DateTime, serializer: S) -> Result<S::Ok, S::Error> {
+fn serialize_timestamp<S: Serializer>(value: &DateTime, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&value.to_string())
 }
 
@@ -232,6 +288,12 @@ pub(crate) trait MicroVmClient: Send + Sync {
     ) -> Result<MicroVmPage, MicroVmClientError>;
 
     async fn launch(&self, spec: &LaunchSpec) -> Result<Launch, MicroVmClientError>;
+
+    /// The names of the streams one log group holds.
+    async fn log_streams(&self, group: &str) -> Result<Vec<String>, MicroVmClientError>;
+
+    /// One page of events from one stream, oldest first.
+    async fn log_events(&self, query: &LogQuery) -> Result<LogPage, MicroVmClientError>;
 }
 
 /// The content-addressed object key of a published bundle.

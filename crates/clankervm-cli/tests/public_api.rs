@@ -7,9 +7,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 use support::{
-    FakeAws, IMAGE_CREATED, IMAGE_CREATING, MICROVMS_NONE, MICROVMS_PAGE_RUNNING,
-    MICROVMS_PAGE_TERMINATED, Response, VERSION_ACTIVE, VERSION_PENDING, VERSIONS_PAGE_ACTIVE,
-    VERSIONS_PAGE_DELETED,
+    FakeAws, IMAGE_CREATED, IMAGE_CREATING, LOG_EVENTS, LOG_STREAMS, MICROVMS_NONE,
+    MICROVMS_PAGE_RUNNING, MICROVMS_PAGE_TERMINATED, Response, VERSION_ACTIVE, VERSION_PENDING,
+    VERSIONS_PAGE_ACTIVE, VERSIONS_PAGE_DELETED,
 };
 use tempfile::TempDir;
 
@@ -38,7 +38,7 @@ fn help_exposes_release_workflow() {
     let output = run_cli(Path::new("."), &["--help"], "");
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    for command in ["init", "push", "status", "list", "run"] {
+    for command in ["init", "push", "status", "list", "run", "logs"] {
         assert!(text.contains(command), "missing {command} in {text}");
     }
     for removed in ["  bundle", "  wait"] {
@@ -384,6 +384,202 @@ fn list_fails_without_reporting_a_partial_page_run() {
 }
 
 #[test]
+fn logs_takes_a_microvm_and_its_own_read_settings() {
+    assert!(Cli::try_parse_from(["clankervm", "logs"]).is_err());
+
+    let ClankerCommand::Logs(logs) = parse(&[
+        "logs",
+        "microvm-1",
+        "--follow",
+        "--raw",
+        "--log-group",
+        "/demo/runs",
+        "--log-stream",
+        "custom",
+        "--since",
+        "15m",
+        "--limit",
+        "10",
+        "--timeout",
+        "5s",
+    ]) else {
+        panic!("expected logs command");
+    };
+
+    assert_eq!(logs.microvm_id, "microvm-1");
+    assert!(logs.follow);
+    assert!(logs.raw);
+    assert_eq!(logs.settings.log_group.as_deref(), Some("/demo/runs"));
+    assert_eq!(logs.settings.log_stream.as_deref(), Some("custom"));
+    assert_eq!(
+        logs.settings.since,
+        Some(std::time::Duration::from_mins(15))
+    );
+    assert_eq!(logs.settings.limit, Some(10));
+    assert_eq!(
+        logs.settings.timeout,
+        Some(std::time::Duration::from_secs(5))
+    );
+}
+
+#[test]
+fn logs_reads_the_stream_of_the_group_run_writes_to() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), FULL_CONFIG);
+    let fake = FakeAws::start(vec![Response::ok(LOG_EVENTS)]);
+
+    let result = run_json(
+        directory.path(),
+        &["--format", "json", "logs", "microvm-1"],
+        &fake.url(),
+    );
+
+    assert_eq!(result["logGroup"], "/demo/runs");
+    assert_eq!(result["logStream"], "microvm-1");
+    let events = result["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["timestamp"], "2026-08-25T00:00:01Z");
+    assert_eq!(events[0]["message"], "hello from a MicroVM\n");
+
+    let request = fake.finish().pop().unwrap();
+    assert!(request.contains("Logs_20140328.GetLogEvents"), "{request}");
+    assert!(
+        request.contains("\"logGroupName\":\"/demo/runs\""),
+        "{request}"
+    );
+    assert!(
+        request.contains("\"logStreamName\":\"microvm-1\""),
+        "{request}"
+    );
+    assert!(request.contains("\"startFromHead\":false"), "{request}");
+    assert!(request.contains("\"limit\":1000"), "{request}");
+    assert!(!request.contains("nextToken"), "{request}");
+}
+
+#[test]
+fn logs_human_output_prints_events_with_their_timestamps() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), FULL_CONFIG);
+    let fake = FakeAws::start(vec![Response::ok(LOG_EVENTS)]);
+
+    let output = run_cli(directory.path(), &["logs", "microvm-1"], &fake.url());
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "2026-08-25T00:00:01Z  hello from a MicroVM\n"
+    );
+    fake.finish();
+}
+
+#[test]
+fn logs_raw_output_prints_the_messages_alone() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), FULL_CONFIG);
+    let fake = FakeAws::start(vec![Response::ok(LOG_EVENTS)]);
+
+    let output = run_cli(
+        directory.path(),
+        &["logs", "microvm-1", "--raw"],
+        &fake.url(),
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "hello from a MicroVM\n"
+    );
+    fake.finish();
+}
+
+#[test]
+fn logs_uses_the_group_aws_streams_to_without_configuration() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+    let fake = FakeAws::start(vec![Response::ok(LOG_EVENTS)]);
+
+    let result = run_json(
+        directory.path(),
+        &["--format", "json", "logs", "microvm-1"],
+        &fake.url(),
+    );
+
+    assert_eq!(result["logGroup"], "/aws/lambda-microvms/demo");
+    let request = fake.finish().pop().unwrap();
+    assert!(
+        request.contains("\"logGroupName\":\"/aws/lambda-microvms/demo\""),
+        "{request}"
+    );
+}
+
+#[test]
+fn logs_flags_point_at_another_destination() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), FULL_CONFIG);
+    let fake = FakeAws::start(vec![Response::ok(LOG_EVENTS)]);
+
+    let result = run_json(
+        directory.path(),
+        &[
+            "--format",
+            "json",
+            "logs",
+            "microvm-1",
+            "--log-group",
+            "/other/group",
+            "--log-stream",
+            "custom",
+        ],
+        &fake.url(),
+    );
+
+    assert_eq!(result["logGroup"], "/other/group");
+    assert_eq!(result["logStream"], "custom");
+    let request = fake.finish().pop().unwrap();
+    assert!(
+        request.contains("\"logGroupName\":\"/other/group\""),
+        "{request}"
+    );
+    assert!(
+        request.contains("\"logStreamName\":\"custom\""),
+        "{request}"
+    );
+}
+
+#[test]
+fn logs_names_the_streams_the_group_has_when_the_stream_is_missing() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), FULL_CONFIG);
+    let fake = FakeAws::start(vec![Response::not_found(), Response::ok(LOG_STREAMS)]);
+
+    let output = run_cli(directory.path(), &["logs", "microvm-9"], &fake.url());
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no log stream `microvm-9` in log group `/demo/runs`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("the group has: job-1, job-2"), "{stderr}");
+    let requests = fake.finish();
+    assert_eq!(requests.len(), 2, "{requests:#?}");
+    assert!(
+        requests[1].contains("Logs_20140328.DescribeLogStreams"),
+        "{}",
+        requests[1]
+    );
+}
+
+#[test]
 fn run_uses_project_defaults_and_forwards_client_token() {
     let directory = TempDir::new().unwrap();
     write_config(directory.path(), FULL_CONFIG);
@@ -480,6 +676,7 @@ fn run_cli(directory: &Path, args: &[&str], url: &str) -> Output {
         .env("AWS_ACCESS_KEY_ID", "test")
         .env("AWS_SECRET_ACCESS_KEY", "test")
         .env("AWS_ENDPOINT_URL", url)
+        .env("AWS_ENDPOINT_URL_CLOUDWATCH_LOGS", url)
         .env("AWS_ENDPOINT_URL_LAMBDA_MICROVMS", url)
         .output()
         .unwrap()

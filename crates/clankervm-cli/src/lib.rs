@@ -80,8 +80,41 @@ pub enum ClankerError {
     WaitTimeout { release: String, timeout: Duration },
     #[error("timed out after {timeout:?} listing MicroVMs; raise --timeout or narrow the filters")]
     ListTimeout { timeout: Duration },
+    #[error(
+        "timed out after {timeout:?} reading {stream} in {group}; raise --timeout or narrow --since"
+    )]
+    LogsTimeout {
+        timeout: Duration,
+        group: String,
+        stream: String,
+    },
+    #[error(
+        "no log stream `{stream}` in log group `{group}`{}; pass --log-group or --log-stream to read another destination",
+        streams_hint(streams)
+    )]
+    LogStreamNotFound {
+        group: String,
+        stream: String,
+        streams: Vec<String>,
+    },
     #[error("project file already exists: {0}; pass --force to replace it")]
     AlreadyInitialized(PathBuf),
     #[error("failed to serialize output: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// How many stream names an error names before it stops listing them.
+const MAX_LISTED_STREAMS: usize = 5;
+
+/// The streams a log group does have, so a wrong stream name is obvious.
+fn streams_hint(streams: &[String]) -> String {
+    if streams.is_empty() {
+        return String::new();
+    }
+    let listed: Vec<&str> = streams
+        .iter()
+        .take(MAX_LISTED_STREAMS)
+        .map(String::as_str)
+        .collect();
+    format!("; the group has: {}", listed.join(", "))
 }
