@@ -112,8 +112,7 @@ pub const MICROVMS_NONE: &str = r#"{"items":[]}"#;
 pub const LOG_EVENTS: &str = r#"{"events":[{"timestamp":1787616001000,"message":"hello from a MicroVM\n","ingestionTime":1787616001000}],"nextForwardToken":"f/1","nextBackwardToken":"b/1"}"#;
 
 /// The streams one log group holds, as `DescribeLogStreams` reports them.
-pub const LOG_STREAMS: &str =
-    r#"{"logStreams":[{"logStreamName":"job-1"},{"logStreamName":"job-2"}]}"#;
+pub const LOG_STREAMS: &str = r#"{"logStreams":[{"logStreamName":"2026/09/11[13.0]microvm-f4e3b5a1-3a16-3f63-8470-251708859820"}]}"#;
 
 /// An image as `GetMicrovmImage` reports it.
 pub const IMAGE_CREATED: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","name":"demo","state":"CREATED","latestActiveImageVersion":"2","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role","imageVersion":"2"}"#;

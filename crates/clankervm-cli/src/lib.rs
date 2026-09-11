@@ -83,20 +83,16 @@ pub enum ClankerError {
     #[error("timed out after {timeout:?} listing MicroVMs; raise --timeout or narrow the filters")]
     ListTimeout { timeout: Duration },
     #[error(
-        "timed out after {timeout:?} reading {stream} in {group}; raise --timeout or narrow --since"
+        "no log stream for MicroVM `{microvm_id}` in log group `{group}`; logs may not have appeared yet; retry later or check --log-group and --region"
     )]
-    LogsTimeout {
-        timeout: Duration,
-        group: String,
-        stream: String,
-    },
+    LogStreamNotFound { group: String, microvm_id: String },
     #[error(
-        "no log stream `{stream}` in log group `{group}`{}; pass --log-group or --log-stream to read another destination",
-        streams_hint(streams)
+        "multiple log streams for MicroVM `{microvm_id}` in log group `{group}`: {}; cannot select a unique stream",
+        streams.join(", ")
     )]
-    LogStreamNotFound {
+    AmbiguousLogStreams {
         group: String,
-        stream: String,
+        microvm_id: String,
         streams: Vec<String>,
     },
     #[error("project file already exists: {0}; pass --force to replace it")]
@@ -127,20 +123,4 @@ pub enum ClankerError {
     },
     #[error("MicroVM `{0}` was not confirmed terminated; check it with `clankervm list`")]
     MicroVmTerminationUnconfirmed(String),
-}
-
-/// How many stream names an error names before it stops listing them.
-const MAX_LISTED_STREAMS: usize = 5;
-
-/// The streams a log group does have, so a wrong stream name is obvious.
-fn streams_hint(streams: &[String]) -> String {
-    if streams.is_empty() {
-        return String::new();
-    }
-    let listed: Vec<&str> = streams
-        .iter()
-        .take(MAX_LISTED_STREAMS)
-        .map(String::as_str)
-        .collect();
-    format!("; the group has: {}", listed.join(", "))
 }
