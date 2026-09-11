@@ -1,174 +1,144 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    InspectImageRequest, MicroVmClient, ObservedImageRelease, PruneImageVersionsRequest,
-    PublishImageRequest, PublishedImage, RunMicroVmRequest, RunMicroVmResponse,
+    ImageSpec, Launch, LaunchSpec, MicroVmClient, Observation, Published, artifact_key,
 };
+use crate::arn::Arn;
+use crate::artifact::Artifact;
 use std::collections::VecDeque;
-use std::future::{Future, ready};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+/// One call recorded by [`FakeMicroVmClient`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MicroVmCall {
-    PublishImage(PublishImageRequest),
-    InspectImage(InspectImageRequest),
-    PruneImageVersions(PruneImageVersionsRequest),
-    RunMicroVm(RunMicroVmRequest),
+pub(crate) enum Call {
+    Publish(ImageSpec),
+    Observe(Arn, Option<String>),
+    Prune(Arn, usize),
+    Launch(LaunchSpec),
 }
 
+/// An in-memory [`MicroVmClient`] that answers scripted responses in order,
+/// falling back to a successful default, and records every call.
 #[derive(Clone, Default)]
-pub struct FakeMicroVmClient {
-    state: Arc<Mutex<FakeState>>,
+pub(crate) struct FakeMicroVmClient {
+    state: Arc<Mutex<State>>,
 }
 
 #[derive(Default)]
-struct FakeState {
-    publish_responses: VecDeque<Result<PublishedImage, MicroVmClientError>>,
-    inspection_responses: VecDeque<Result<Option<ObservedImageRelease>, MicroVmClientError>>,
-    prune_responses: VecDeque<Result<(), MicroVmClientError>>,
-    run_responses: VecDeque<Result<RunMicroVmResponse, MicroVmClientError>>,
-    calls: Vec<MicroVmCall>,
+struct State {
+    published: VecDeque<Result<Published, MicroVmClientError>>,
+    observed: VecDeque<Result<Option<Observation>, MicroVmClientError>>,
+    pruned: VecDeque<Result<(), MicroVmClientError>>,
+    launched: VecDeque<Result<Launch, MicroVmClientError>>,
+    calls: Vec<Call>,
 }
 
 impl FakeMicroVmClient {
-    pub fn builder() -> FakeMicroVmClientBuilder {
-        FakeMicroVmClientBuilder::default()
-    }
-
-    pub fn calls(&self) -> Vec<MicroVmCall> {
-        self.state
-            .lock()
-            .expect("fake mutex poisoned")
-            .calls
-            .clone()
-    }
-}
-
-#[derive(Default)]
-pub struct FakeMicroVmClientBuilder {
-    state: FakeState,
-}
-
-impl FakeMicroVmClientBuilder {
-    pub fn publish_responses(
-        mut self,
-        responses: impl IntoIterator<Item = Result<PublishedImage, MicroVmClientError>>,
+    pub(crate) fn published(
+        self,
+        responses: impl IntoIterator<Item = Result<Published, MicroVmClientError>>,
     ) -> Self {
-        self.state.publish_responses = responses.into_iter().collect();
+        self.lock().published = responses.into_iter().collect();
         self
     }
 
-    pub fn inspection_responses(
-        mut self,
-        responses: impl IntoIterator<Item = Result<Option<ObservedImageRelease>, MicroVmClientError>>,
+    pub(crate) fn observed(
+        self,
+        responses: impl IntoIterator<Item = Result<Option<Observation>, MicroVmClientError>>,
     ) -> Self {
-        self.state.inspection_responses = responses.into_iter().collect();
+        self.lock().observed = responses.into_iter().collect();
         self
     }
 
-    pub fn prune_responses(
-        mut self,
+    pub(crate) fn pruned(
+        self,
         responses: impl IntoIterator<Item = Result<(), MicroVmClientError>>,
     ) -> Self {
-        self.state.prune_responses = responses.into_iter().collect();
+        self.lock().pruned = responses.into_iter().collect();
         self
     }
 
-    pub fn run_responses(
-        mut self,
-        responses: impl IntoIterator<Item = Result<RunMicroVmResponse, MicroVmClientError>>,
+    pub(crate) fn launched(
+        self,
+        responses: impl IntoIterator<Item = Result<Launch, MicroVmClientError>>,
     ) -> Self {
-        self.state.run_responses = responses.into_iter().collect();
+        self.lock().launched = responses.into_iter().collect();
         self
     }
 
-    pub fn build(self) -> FakeMicroVmClient {
-        FakeMicroVmClient {
-            state: Arc::new(Mutex::new(self.state)),
-        }
+    pub(crate) fn calls(&self) -> Vec<Call> {
+        self.lock().calls.clone()
+    }
+
+    fn answer<T>(
+        &self,
+        call: Call,
+        scripted: impl FnOnce(&mut State) -> Option<T>,
+        default: impl FnOnce() -> T,
+    ) -> T {
+        let mut state = self.lock();
+        state.calls.push(call);
+        scripted(&mut state).unwrap_or_else(default)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().expect("fake mutex poisoned")
     }
 }
 
+// The trait is async; the fake resolves immediately without awaiting.
+#[allow(clippy::unused_async_trait_impl)]
 impl MicroVmClient for FakeMicroVmClient {
-    fn publish_image(
+    async fn publish(
         &self,
-        request: PublishImageRequest,
-    ) -> impl Future<Output = Result<PublishedImage, MicroVmClientError>> {
-        let default = PublishedImage {
-            image_version: "1".into(),
-            artifact_uri: format!(
-                "s3://{}/clankervm/{}/bundles/{}.zip",
-                request.artifact_bucket, request.name, request.bundle_digest
-            ),
-        };
-        let mut state = self.state.lock().expect("fake mutex poisoned");
-        state.calls.push(MicroVmCall::PublishImage(request));
-        ready(state.publish_responses.pop_front().unwrap_or(Ok(default)))
+        spec: &ImageSpec,
+        bundle: &Artifact,
+    ) -> Result<Published, MicroVmClientError> {
+        self.answer(
+            Call::Publish(spec.clone()),
+            |state| state.published.pop_front(),
+            || {
+                Ok(Published {
+                    version: "1".into(),
+                    artifact_uri: format!(
+                        "s3://{}/{}",
+                        spec.bucket,
+                        artifact_key(&spec.name, &bundle.digest)
+                    ),
+                })
+            },
+        )
     }
 
-    fn inspect_image(
+    async fn observe(
         &self,
-        request: InspectImageRequest,
-    ) -> impl Future<Output = Result<Option<ObservedImageRelease>, MicroVmClientError>> {
-        let mut state = self.state.lock().expect("fake mutex poisoned");
-        state.calls.push(MicroVmCall::InspectImage(request));
-        ready(state.inspection_responses.pop_front().unwrap_or(Ok(None)))
+        image: &Arn,
+        version: Option<&str>,
+    ) -> Result<Option<Observation>, MicroVmClientError> {
+        self.answer(
+            Call::Observe(image.clone(), version.map(str::to_owned)),
+            |state| state.observed.pop_front(),
+            || Ok(None),
+        )
     }
 
-    fn prune_image_versions(
-        &self,
-        request: PruneImageVersionsRequest,
-    ) -> impl Future<Output = Result<(), MicroVmClientError>> {
-        let mut state = self.state.lock().expect("fake mutex poisoned");
-        state.calls.push(MicroVmCall::PruneImageVersions(request));
-        ready(state.prune_responses.pop_front().unwrap_or(Ok(())))
+    async fn prune(&self, image: &Arn, keep: usize) -> Result<(), MicroVmClientError> {
+        self.answer(
+            Call::Prune(image.clone(), keep),
+            |state| state.pruned.pop_front(),
+            || Ok(()),
+        )
     }
 
-    fn run_microvm(
-        &self,
-        request: RunMicroVmRequest,
-    ) -> impl Future<Output = Result<RunMicroVmResponse, MicroVmClientError>> {
-        let mut state = self.state.lock().expect("fake mutex poisoned");
-        state.calls.push(MicroVmCall::RunMicroVm(request));
-        ready(state.run_responses.pop_front().unwrap_or_else(|| {
-            Ok(RunMicroVmResponse {
-                microvm_id: "microvm-fake".into(),
-                image_version: "1".into(),
-            })
-        }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::client::InspectImageRequest;
-    use crate::test_support::ObservedImageReleaseBuilder;
-
-    #[tokio::test]
-    async fn fake_scripts_inspections_and_records_high_level_calls() {
-        let observed = ObservedImageReleaseBuilder::active("2");
-        let client = FakeMicroVmClient::builder()
-            .inspection_responses([Ok(None), Ok(Some(observed.clone()))])
-            .build();
-        let request = InspectImageRequest {
-            image_identifier: crate::Arn::parse(
-                "arn:aws:lambda:region:account:microvm-image:image",
-            )
-            .unwrap(),
-            image_version: Some("2".into()),
-        };
-
-        assert_eq!(client.inspect_image(request.clone()).await.unwrap(), None);
-        assert_eq!(
-            client.inspect_image(request.clone()).await.unwrap(),
-            Some(observed)
-        );
-        assert_eq!(
-            client.calls(),
-            vec![
-                MicroVmCall::InspectImage(request.clone()),
-                MicroVmCall::InspectImage(request),
-            ]
-        );
+    async fn launch(&self, spec: &LaunchSpec) -> Result<Launch, MicroVmClientError> {
+        self.answer(
+            Call::Launch(spec.clone()),
+            |state| state.launched.pop_front(),
+            || {
+                Ok(Launch {
+                    microvm_id: "microvm-fake".into(),
+                    image_version: "1".into(),
+                })
+            },
+        )
     }
 }

@@ -1,42 +1,23 @@
 use super::error::MicroVmClientError;
-use crate::{Arn, Tags};
-use serde::{Deserialize, Deserializer};
-use std::str::FromStr;
+use crate::arn::Arn;
+use crate::artifact::Artifact;
+use aws_sdk_lambdamicrovms::types::Capability;
+use serde::Serialize;
+use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImageCapability {
-    All,
-}
-
-impl ImageCapability {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "ALL",
-        }
-    }
-}
-
-impl FromStr for ImageCapability {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "ALL" => Ok(Self::All),
-            _ => Err(format!("unknown image capability `{value}`")),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ImageCapability {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-}
+/// AWS image states that are still making progress.
+const IMAGE_PENDING_STATES: [&str; 4] = ["CREATING", "CREATED", "UPDATING", "UPDATED"];
+/// AWS image version states that are still making progress.
+const VERSION_PENDING_STATES: [&str; 3] = ["PENDING", "IN_PROGRESS", "SUCCESSFUL"];
+/// AWS image states a ready release can report.
+const IMAGE_READY_STATES: [&str; 2] = ["CREATED", "UPDATED"];
+/// AWS image version state of a successfully built release.
+const VERSION_READY_STATE: &str = "SUCCESSFUL";
+/// AWS image version status of an active release.
+pub(crate) const VERSION_ACTIVE_STATUS: &str = "ACTIVE";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImageHooks {
+pub(crate) struct ImageHooks {
     pub port: i32,
     pub ready_timeout_seconds: i32,
     pub run_timeout_seconds: i32,
@@ -44,48 +25,36 @@ pub struct ImageHooks {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImageConfiguration {
+pub(crate) struct ImageConfiguration {
     pub base_image_arn: Arn,
     pub build_role_arn: Arn,
     pub description: String,
     pub minimum_memory_mib: Option<i32>,
-    pub capabilities: Vec<ImageCapability>,
+    pub capabilities: Vec<Capability>,
     pub egress_network_connector: Arn,
     pub hooks: ImageHooks,
 }
 
+/// Everything the client needs to publish one bundle as an image version.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublishImageRequest {
-    pub image_identifier: Arn,
+pub(crate) struct ImageSpec {
+    pub arn: Arn,
     pub name: String,
-    pub bundle: Vec<u8>,
-    pub bundle_digest: String,
-    pub artifact_bucket: String,
+    pub bucket: String,
+    pub tags: BTreeMap<String, String>,
     pub configuration: ImageConfiguration,
-    pub tags: Tags,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublishedImage {
-    pub image_version: String,
+pub(crate) struct Published {
+    pub version: String,
     pub artifact_uri: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InspectImageRequest {
-    pub image_identifier: Arn,
-    pub image_version: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReleasePhase {
-    Pending,
-    Ready,
-    Failed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ObservedImageRelease {
+/// What AWS currently reports for one image release.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Observation {
     pub image_version: String,
     pub image_state: String,
     pub version_state: String,
@@ -93,39 +62,39 @@ pub struct ObservedImageRelease {
     pub state_reason: Option<String>,
 }
 
-impl ObservedImageRelease {
-    /// Unknown or unexpected AWS states fail fast instead of polling forever.
-    pub fn phase(&self) -> ReleasePhase {
-        let image_pending = matches!(
-            self.image_state.as_str(),
-            "CREATING" | "CREATED" | "UPDATING" | "UPDATED"
-        );
-        let version_pending = matches!(
-            self.version_state.as_str(),
-            "PENDING" | "IN_PROGRESS" | "SUCCESSFUL"
-        );
-        let ready = matches!(self.image_state.as_str(), "CREATED" | "UPDATED")
-            && self.version_state == "SUCCESSFUL"
-            && self.version_status == "ACTIVE";
-        if ready {
-            ReleasePhase::Ready
-        } else if image_pending && version_pending {
-            ReleasePhase::Pending
-        } else {
-            ReleasePhase::Failed
+impl Observation {
+    /// The image is built and this version is active.
+    pub(crate) fn is_ready(&self) -> bool {
+        IMAGE_READY_STATES.contains(&self.image_state.as_str())
+            && self.version_state == VERSION_READY_STATE
+            && self.version_status == VERSION_ACTIVE_STATUS
+    }
+
+    /// Still building; unknown or unexpected states count as failures so
+    /// polling fails fast instead of waiting forever.
+    pub(crate) fn is_pending(&self) -> bool {
+        IMAGE_PENDING_STATES.contains(&self.image_state.as_str())
+            && VERSION_PENDING_STATES.contains(&self.version_state.as_str())
+    }
+}
+
+/// A release AWS has not reported yet.
+impl Default for Observation {
+    fn default() -> Self {
+        Self {
+            image_version: String::new(),
+            image_state: "PENDING".into(),
+            version_state: "PENDING".into(),
+            version_status: "INACTIVE".into(),
+            state_reason: None,
         }
     }
 }
 
+/// Everything the client needs to start one MicroVM.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PruneImageVersionsRequest {
-    pub image_identifier: Arn,
-    pub versions_to_keep: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RunMicroVmRequest {
-    pub image_identifier: Arn,
+pub(crate) struct LaunchSpec {
+    pub image_arn: Arn,
     pub image_version: Option<String>,
     pub execution_role_arn: Arn,
     pub ingress_network_connector: Arn,
@@ -137,30 +106,35 @@ pub struct RunMicroVmRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RunMicroVmResponse {
+pub(crate) struct Launch {
     pub microvm_id: String,
     pub image_version: String,
 }
 
+/// The AWS operations ClankerVM performs, expressed in domain terms.
 #[allow(async_fn_in_trait)]
-pub trait MicroVmClient: Send + Sync {
-    async fn publish_image(
+pub(crate) trait MicroVmClient: Send + Sync {
+    /// Creates or updates the image and returns the version AWS reports.
+    async fn publish(
         &self,
-        request: PublishImageRequest,
-    ) -> Result<PublishedImage, MicroVmClientError>;
+        spec: &ImageSpec,
+        bundle: &Artifact,
+    ) -> Result<Published, MicroVmClientError>;
 
-    async fn inspect_image(
+    /// The current release state, or `None` when the image or version is gone.
+    async fn observe(
         &self,
-        request: InspectImageRequest,
-    ) -> Result<Option<ObservedImageRelease>, MicroVmClientError>;
+        image: &Arn,
+        version: Option<&str>,
+    ) -> Result<Option<Observation>, MicroVmClientError>;
 
-    async fn prune_image_versions(
-        &self,
-        request: PruneImageVersionsRequest,
-    ) -> Result<(), MicroVmClientError>;
+    /// Deletes inactive versions beyond the newest `keep`.
+    async fn prune(&self, image: &Arn, keep: usize) -> Result<(), MicroVmClientError>;
 
-    async fn run_microvm(
-        &self,
-        request: RunMicroVmRequest,
-    ) -> Result<RunMicroVmResponse, MicroVmClientError>;
+    async fn launch(&self, spec: &LaunchSpec) -> Result<Launch, MicroVmClientError>;
+}
+
+/// The content-addressed object key of a published bundle.
+pub(crate) fn artifact_key(name: &str, digest: &str) -> String {
+    format!("clankervm/{name}/bundles/{digest}.zip")
 }
