@@ -3,11 +3,9 @@ mod artifact;
 mod client;
 mod commands;
 mod config;
-mod environment;
 mod output;
 mod payload;
 mod release;
-mod tags;
 #[cfg(test)]
 mod test_support;
 mod util;
@@ -18,13 +16,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub use client::MicroVmClientError;
-pub use commands::Command;
-pub use payload::{PayloadError, build_run_payload, build_run_payload_with_environment};
-
-pub(crate) use arn::Arn;
-pub(crate) use client::AwsMicroVmClient;
-pub(crate) use config::Project;
-pub(crate) use tags::Tags;
+pub use commands::{Command, execute};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -72,12 +64,8 @@ pub enum ClankerError {
         #[source]
         source: std::io::Error,
     },
-    #[error("invalid release `{0}`; expected NAME@VERSION")]
-    InvalidRelease(String),
-    #[error("invalid image `{0}`")]
-    InvalidImage(String),
-    #[error("invalid ARN `{0}`")]
-    InvalidArn(String),
+    #[error("image {0} does not exist; push a release first")]
+    ImageNotFound(String),
     #[error(transparent)]
     MicroVmClient(#[from] MicroVmClientError),
     #[error("release {release} failed: {reason}\nBuild logs: {log_group}")]
@@ -92,12 +80,6 @@ pub enum ClankerError {
     WaitTimeout { release: String, timeout: Duration },
     #[error("project file already exists: {0}; pass --force to replace it")]
     AlreadyInitialized(PathBuf),
-    #[error(transparent)]
-    Payload(#[from] PayloadError),
     #[error("failed to serialize output: {0}")]
     Json(#[from] serde_json::Error),
-}
-
-pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
-    commands::execute(cli.command, cli.config, cli.format, cli.region).await
 }

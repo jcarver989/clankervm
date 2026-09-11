@@ -22,7 +22,7 @@ impl Artifact {
         }
     }
 
-    pub(crate) fn from_zip(path: &Path) -> io::Result<Self> {
+    fn from_zip(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
         // Validate the input now so an arbitrary file is not uploaded as a bundle.
         zip::ZipArchive::new(Cursor::new(&bytes)).map_err(zip_error)?;

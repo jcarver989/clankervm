@@ -2,55 +2,52 @@ mod init;
 mod push;
 mod run;
 mod status;
-use crate::{AwsMicroVmClient, ClankerError, OutputFormat, Project};
+
+use crate::client::AwsMicroVmClient;
+use crate::config::ProjectConfig;
+use crate::{ClankerError, Cli};
 use aws_config::{BehaviorVersion, Region};
 use clap::Subcommand;
 use init::InitArgs;
-use push::PushArgs;
-pub(crate) use push::PushConfig;
-use run::RunArgs;
-pub(crate) use run::RunConfig;
-use status::StatusArgs;
-pub(crate) use status::StatusConfig;
-use std::path::PathBuf;
+pub use push::PushOptions;
+pub(crate) use push::PushSettings;
+pub use run::RunOptions;
+pub(crate) use run::RunSettings;
+pub use status::StatusOptions;
+pub(crate) use status::StatusSettings;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Create a new ClankerVM project file.
     Init(InitArgs),
     /// Release a prepared directory or ZIP as a new image version.
-    Push(PushArgs),
+    Push(PushOptions),
     /// Inspect a release, optionally waiting for it to become active.
-    Status(StatusArgs),
+    Status(StatusOptions),
     /// Start a command in a MicroVM.
-    Run(RunArgs),
+    Run(RunOptions),
 }
 
-pub(crate) async fn execute(
-    command: Command,
-    config_path: PathBuf,
-    format: OutputFormat,
-    region: Option<String>,
-) -> Result<(), ClankerError> {
-    if let Command::Init(args) = &command {
-        return init::execute(args, &config_path, format);
+pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
+    if let Command::Init(args) = &cli.command {
+        return init::execute(args, &cli.config, cli.format);
     }
 
-    let project = Project::load(&config_path, region)?;
+    let config = ProjectConfig::load(&cli.config, cli.region)?;
     let mut sdk_loader = aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new(project.config.image.region.clone()));
+        .region(Region::new(config.image.region.clone()));
 
-    if let Some(profile) = &project.config.image.profile {
+    if let Some(profile) = &config.image.profile {
         sdk_loader = sdk_loader.profile_name(profile);
     }
 
     let sdk = sdk_loader.load().await;
-
     let client = AwsMicroVmClient::new(&sdk);
-    match command {
-        Command::Push(args) => push::execute(args, &project, format, &client).await,
-        Command::Status(args) => status::execute(args, &project, format, &client).await,
-        Command::Run(args) => run::execute(args, &project, format, &client).await,
+
+    match &cli.command {
+        Command::Push(options) => push::execute(options, &config, cli.format, &client).await,
+        Command::Status(options) => status::execute(options, &config, cli.format, &client).await,
+        Command::Run(options) => run::execute(options, &config, cli.format, &client).await,
         Command::Init(_) => unreachable!("init returns before project setup"),
     }
 }

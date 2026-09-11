@@ -1,3 +1,4 @@
+use crate::client::Observation;
 use crate::release::ReleaseStatus;
 use crate::{ClankerError, OutputFormat};
 use serde::Serialize;
@@ -14,9 +15,10 @@ pub(crate) fn render<T: Serialize>(
     Ok(())
 }
 
+/// Human progress on stderr, suppressed once the same state was reported.
 pub(crate) struct ReleaseProgress {
     enabled: bool,
-    prior: Option<(String, String, String)>,
+    prior: Option<Observation>,
 }
 
 impl ReleaseProgress {
@@ -28,21 +30,14 @@ impl ReleaseProgress {
     }
 
     pub(crate) fn report(&mut self, release: &ReleaseStatus) {
-        if !self.enabled {
-            return;
-        }
-        let state = (
-            release.image_state.clone(),
-            release.version_state.clone(),
-            release.version_status.clone(),
-        );
-        if self.prior.as_ref() == Some(&state) {
+        let observed = &release.observation;
+        if !self.enabled || self.prior.as_ref() == Some(observed) {
             return;
         }
         eprintln!(
             "  Image: {:<10} Build: {:<10} Activation: {}",
-            release.image_state, release.version_state, release.version_status
+            observed.image_state, observed.version_state, observed.version_status
         );
-        self.prior = Some(state);
+        self.prior = Some(observed.clone());
     }
 }

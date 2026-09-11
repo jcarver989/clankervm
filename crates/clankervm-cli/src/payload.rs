@@ -1,45 +1,20 @@
+use crate::ClankerError;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use thiserror::Error;
 
 const MAX_PAYLOAD_BYTES: usize = 4096;
 
-#[derive(Debug, Error)]
-pub enum PayloadError {
-    #[error("{field} must not contain NUL bytes")]
-    InvalidNul { field: &'static str },
-    #[error("environment contains an invalid key or value")]
-    InvalidEnvironment,
-    #[error("run hook payload is {size} bytes; AWS allows at most {limit}")]
-    TooLarge { size: usize, limit: usize },
-}
-
-pub fn build_run_payload(
-    command: &str,
-    args: &[String],
-    region: &str,
-) -> Result<String, PayloadError> {
-    build_run_payload_with_environment(command, args, BTreeMap::new(), region)
-}
-
-pub fn build_run_payload_with_environment(
+/// The run hook payload the guest expects, with the AWS region exported.
+pub(crate) fn build_run_payload(
     command: &str,
     args: &[String],
     mut environment: BTreeMap<String, String>,
     region: &str,
-) -> Result<String, PayloadError> {
-    if command.contains('\0') {
-        return Err(PayloadError::InvalidNul { field: "command" });
-    }
-    if args.iter().any(|argument| argument.contains('\0')) {
-        return Err(PayloadError::InvalidNul { field: "arguments" });
-    }
-
-    if environment
-        .iter()
-        .any(|(key, value)| key.is_empty() || key.contains(['=', '\0']) || value.contains('\0'))
-    {
-        return Err(PayloadError::InvalidEnvironment);
+) -> Result<String, ClankerError> {
+    if command.contains('\0') || args.iter().any(|argument| argument.contains('\0')) {
+        return Err(ClankerError::InvalidConfig(
+            "run command and arguments must not contain NUL bytes".into(),
+        ));
     }
     environment.insert("AWS_DEFAULT_REGION".into(), region.into());
     environment.insert("AWS_REGION".into(), region.into());
@@ -47,13 +22,12 @@ pub fn build_run_payload_with_environment(
         command,
         args,
         environment,
-    })
-    .expect("payload serialization cannot fail");
+    })?;
     if payload.len() > MAX_PAYLOAD_BYTES {
-        return Err(PayloadError::TooLarge {
-            size: payload.len(),
-            limit: MAX_PAYLOAD_BYTES,
-        });
+        return Err(ClankerError::InvalidConfig(format!(
+            "run hook payload is {} bytes; AWS allows at most {MAX_PAYLOAD_BYTES}",
+            payload.len()
+        )));
     }
     Ok(payload)
 }
@@ -63,4 +37,33 @@ struct Payload<'a> {
     command: &'a str,
     args: &'a [String],
     environment: BTreeMap<String, String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_preserves_the_command_and_exports_the_region() {
+        let payload = build_run_payload(
+            "echo",
+            &["hello world".into()],
+            BTreeMap::new(),
+            "us-east-1",
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(json["command"], "echo");
+        assert_eq!(json["args"], serde_json::json!(["hello world"]));
+        assert_eq!(json["environment"]["AWS_REGION"], "us-east-1");
+    }
+
+    #[test]
+    fn oversized_and_nul_payloads_are_rejected() {
+        for (command, argument) in [("sh", "x".repeat(5000)), ("sh\0", String::new())] {
+            let error =
+                build_run_payload(command, &[argument], BTreeMap::new(), "region").unwrap_err();
+            assert!(matches!(error, ClankerError::InvalidConfig(_)), "{error}");
+        }
+    }
 }

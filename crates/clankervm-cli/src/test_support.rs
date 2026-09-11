@@ -1,110 +1,48 @@
-use crate::client::ObservedImageRelease;
-use crate::commands::{PushConfig, RunConfig, StatusConfig};
-use crate::config::{ImageConfig, Project, ProjectConfig};
-use std::path::{Path, PathBuf};
+//! Shared fixtures for the crate's own tests.
 
-pub(crate) struct ProjectConfigBuilder {
-    name: String,
-    region: String,
-    push: PushConfig,
-    status: StatusConfig,
-    run: RunConfig,
+use crate::client::Observation;
+use crate::config::ProjectConfig;
+use std::fs;
+use std::path::Path;
+
+/// A `[run]` entry naming the account role tests resolve the image from.
+pub(crate) const ROLE: &str = "execution-role-arn = \"arn:aws:iam::123456789012:role/run\"\n";
+
+pub(crate) fn active(version: &str) -> Observation {
+    observation(version, "CREATED", "SUCCESSFUL", "ACTIVE")
 }
 
-impl ProjectConfigBuilder {
-    pub(crate) fn new() -> Self {
-        Self {
-            name: "demo".into(),
-            region: "us-east-1".into(),
-            push: PushConfig::default(),
-            status: StatusConfig::default(),
-            run: RunConfig::default(),
-        }
-    }
+pub(crate) fn pending(version: &str) -> Observation {
+    observation(version, "CREATING", "IN_PROGRESS", "INACTIVE")
+}
 
-    pub(crate) fn push(mut self, push: PushConfig) -> Self {
-        self.push = push;
-        self
-    }
+pub(crate) fn failed(version: &str) -> Observation {
+    observation(version, "CREATED", "FAILED", "INACTIVE")
+}
 
-    pub(crate) fn run(mut self, run: RunConfig) -> Self {
-        self.run = run;
-        self
-    }
-
-    pub(crate) fn build(self) -> ProjectConfig {
-        ProjectConfig {
-            schema_version: 1,
-            image: ImageConfig {
-                name: self.name,
-                region: self.region,
-                profile: None,
-            },
-            push: self.push,
-            status: self.status,
-            run: self.run,
-        }
+fn observation(
+    version: &str,
+    image_state: &str,
+    version_state: &str,
+    version_status: &str,
+) -> Observation {
+    Observation {
+        image_version: version.into(),
+        image_state: image_state.into(),
+        version_state: version_state.into(),
+        version_status: version_status.into(),
+        state_reason: None,
     }
 }
 
-pub(crate) struct ProjectBuilder {
-    root: PathBuf,
-    config: ProjectConfigBuilder,
-}
-
-impl ProjectBuilder {
-    pub(crate) fn new(root: &Path) -> Self {
-        Self {
-            root: root.into(),
-            config: ProjectConfigBuilder::new(),
-        }
-    }
-
-    pub(crate) fn push(mut self, push: PushConfig) -> Self {
-        self.config = self.config.push(push);
-        self
-    }
-
-    pub(crate) fn build(self) -> Project {
-        Project::from_parts(self.config.build(), self.root)
-    }
-}
-
-pub(crate) struct ObservedImageReleaseBuilder {
-    release: ObservedImageRelease,
-}
-
-impl ObservedImageReleaseBuilder {
-    pub(crate) fn active(version: &str) -> ObservedImageRelease {
-        Self::new(version, "CREATED", "SUCCESSFUL", "ACTIVE").build()
-    }
-
-    pub(crate) fn pending(version: &str) -> ObservedImageRelease {
-        Self::new(version, "CREATING", "IN_PROGRESS", "INACTIVE").build()
-    }
-
-    pub(crate) fn failed(version: &str) -> Self {
-        Self::new(version, "CREATED", "FAILED", "INACTIVE")
-    }
-
-    pub(crate) fn reason(mut self, reason: &str) -> Self {
-        self.release.state_reason = Some(reason.into());
-        self
-    }
-
-    pub(crate) fn build(self) -> ObservedImageRelease {
-        self.release
-    }
-
-    fn new(version: &str, image_state: &str, version_state: &str, version_status: &str) -> Self {
-        Self {
-            release: ObservedImageRelease {
-                image_version: version.into(),
-                image_state: image_state.into(),
-                version_state: version_state.into(),
-                version_status: version_status.into(),
-                state_reason: None,
-            },
-        }
-    }
+/// Writes a real project file and loads it, so tests exercise the file schema
+/// and its precedence rules instead of a hand-built config.
+pub(crate) fn project(directory: &Path, sections: &str) -> ProjectConfig {
+    let path = directory.join("clankervm.toml");
+    fs::write(
+        &path,
+        format!("schema-version = 1\n[image]\nname = \"demo\"\nregion = \"us-east-1\"\n{sections}"),
+    )
+    .unwrap();
+    ProjectConfig::load(&path, None).unwrap()
 }

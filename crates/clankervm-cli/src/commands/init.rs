@@ -111,7 +111,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("clankervm.toml");
         fs::write(&path, template(&args)).unwrap();
-        let config = ProjectConfig::load(&path).unwrap();
+        let config = ProjectConfig::load(&path, None).unwrap();
 
         assert_eq!(config.image.name, args.name);
         assert_eq!(config.image.region, args.region);

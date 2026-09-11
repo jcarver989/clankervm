@@ -1,20 +1,16 @@
 use crate::ClankerError;
 use base16ct::lower::encode_string;
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::collections::BTreeMap;
 
 pub(crate) fn parse_release(value: &str) -> Result<(&str, &str), ClankerError> {
-    value
-        .rsplit_once('@')
-        .ok_or_else(|| ClankerError::InvalidRelease(value.into()))
+    value.rsplit_once('@').ok_or_else(|| {
+        ClankerError::InvalidConfig(format!("invalid release `{value}`; expected NAME@VERSION"))
+    })
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     encode_string(Sha256::digest(bytes).as_ref())
-}
-
-pub(crate) fn parse_duration(value: &str) -> Result<Duration, String> {
-    humantime::parse_duration(value).map_err(|error| error.to_string())
 }
 
 pub(crate) fn validate_non_empty(value: Option<&str>, name: &str) -> Result<(), ClankerError> {
@@ -26,25 +22,63 @@ pub(crate) fn validate_non_empty(value: Option<&str>, name: &str) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn non_empty_string(
-    value: Option<String>,
-    name: &str,
-) -> Result<Option<String>, ClankerError> {
-    validate_non_empty(value.as_deref(), name)?;
-    Ok(value)
+pub(crate) fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, ClankerError> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(ClankerError::InvalidConfig(format!(
+            "{name} must be configured"
+        ))),
+    }
 }
 
-pub(crate) fn required_string(value: Option<String>, name: &str) -> Result<String, ClankerError> {
-    non_empty_string(value, name)?
-        .ok_or_else(|| ClankerError::InvalidConfig(format!("{name} must be configured")))
+pub(crate) fn parse_key_values(
+    values: &[String],
+    label: &str,
+    require_value: bool,
+) -> Result<BTreeMap<String, String>, ClankerError> {
+    let mut pairs = BTreeMap::new();
+    for value in values {
+        let (key, pair) = value.split_once('=').ok_or_else(|| {
+            ClankerError::InvalidConfig(format!("invalid {label} `{value}`; expected key=value"))
+        })?;
+        if key.is_empty()
+            || key.contains(['=', '\0'])
+            || pair.contains('\0')
+            || (require_value && pair.is_empty())
+        {
+            return Err(ClankerError::InvalidConfig(format!(
+                "invalid {label} `{value}`"
+            )));
+        }
+        if pairs.insert(key.into(), pair.into()).is_some() {
+            return Err(ClankerError::InvalidConfig(format!(
+                "duplicate {label} key `{key}`"
+            )));
+        }
+    }
+    Ok(pairs)
 }
 
-pub(crate) fn deserialize_optional_duration<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Duration>, D::Error> {
-    use serde::Deserialize;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    Option::<String>::deserialize(deserializer)?
-        .map(|value| humantime::parse_duration(&value).map_err(serde::de::Error::custom))
-        .transpose()
+    #[test]
+    fn key_values_reject_malformed_pairs_and_only_tags_require_a_value() {
+        for values in [
+            vec!["missing-equals".into()],
+            vec!["=value".into()],
+            vec!["A=1".into(), "A=2".into()],
+        ] {
+            assert!(
+                parse_key_values(&values, "pair", false).is_err(),
+                "accepted {values:?}"
+            );
+        }
+
+        let empty = ["EMPTY=".to_owned()];
+        assert!(parse_key_values(&empty, "tag", true).is_err());
+        let environment = parse_key_values(&empty, "environment variable", false).unwrap();
+        assert_eq!(environment.get("EMPTY").map(String::as_str), Some(""));
+    }
 }

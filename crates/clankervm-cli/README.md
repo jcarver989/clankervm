@@ -64,7 +64,7 @@ clankervm push --context image --base-image al2023-1 \
   --tag imageName=my-runner --tag team=platform
 ```
 
-For every setting, command-line values take precedence over TOML values, which take precedence over built-in defaults. `--bundle PATH` is intentionally invocation-only and supplies an existing ZIP instead of `[push].context`. Tags must be `key=value`; malformed and duplicate tag keys are rejected. Unknown configuration fields are rejected.
+For every setting, command-line values take precedence over TOML values, which take precedence over built-in defaults. The positional `push PATH` is intentionally invocation-only and supplies a directory or existing ZIP instead of `[push].context`. Tags must be `key=value`; malformed and duplicate tag keys are rejected. Unknown configuration fields are rejected.
 
 For multiple images, keep each deployment unit explicit:
 
@@ -81,13 +81,12 @@ ClankerVM does not compile or prepare application assets. Prepare an image direc
 
 `push` accepts either a prepared directory or a prebuilt ZIP. A directory is converted to a deterministic ZIP; an existing ZIP is validated and uploaded byte-for-byte. In both cases ClankerVM uses an immutable content-addressed S3 key, creates or updates the image through the Rust AWS SDK, and waits for the exact version returned by AWS. After activation, `keep-versions = N` deletes inactive versions beyond the newest N.
 
-With no path, `push` uses `[push].context`. The positional path overrides it. The invocation-only `--bundle` option remains supported for compatibility and is equivalent to passing the ZIP as the positional path.
+With no path, `push` uses `[push].context`. The positional path overrides it.
 
 ```sh
 clankervm push
 clankervm push path/to/prepared-directory
 clankervm push path/to/image.zip
-clankervm push --bundle path/to/image.zip
 ```
 
 ## Status

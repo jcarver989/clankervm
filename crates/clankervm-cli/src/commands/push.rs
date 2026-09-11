@@ -1,17 +1,15 @@
 use crate::artifact::Artifact;
-use crate::client::{
-    ImageCapability, ImageConfiguration, ImageHooks, MicroVmClient, PruneImageVersionsRequest,
-    PublishImageRequest,
-};
+use crate::client::MicroVmClient;
+use crate::config::{ProjectConfig, Settings};
 use crate::output::{ReleaseProgress, render};
 use crate::release::{Release, ReleaseStatus, wait_for_release};
-use crate::util::{
-    deserialize_optional_duration, non_empty_string, parse_duration, required_string,
-};
-use crate::{Arn, ClankerError, OutputFormat, Project, Tags};
+use crate::util::{parse_key_values, required, validate_non_empty};
+use crate::{ClankerError, OutputFormat};
+use aws_sdk_lambdamicrovms::types::Capability;
 use clap::Args;
-use serde::Deserialize;
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const DEFAULT_CONTEXT: &str = ".";
@@ -21,22 +19,21 @@ const DEFAULT_PORT: i32 = 9000;
 const DEFAULT_READY_TIMEOUT_SECONDS: i32 = 300;
 const DEFAULT_RUN_TIMEOUT_SECONDS: i32 = 60;
 const DEFAULT_TERMINATE_TIMEOUT_SECONDS: i32 = 30;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Default, Args)]
-pub struct PushArgs {
+pub struct PushOptions {
     /// Prepared directory to ZIP or an existing ZIP file. Overrides push.context.
-    #[arg(value_name = "PATH", conflicts_with = "bundle")]
+    #[arg(value_name = "PATH")]
     pub source: Option<PathBuf>,
-    /// Use an existing ZIP instead of bundling the configured context.
-    #[arg(long)]
-    pub bundle: Option<PathBuf>,
     #[command(flatten)]
-    pub config: PushConfig,
+    pub settings: PushSettings,
 }
 
-#[derive(Clone, Debug, Default, Args, Deserialize)]
+/// Push settings, shared by `--flags` and the `[push]` table.
+#[derive(Clone, Debug, Default, Args, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
-pub struct PushConfig {
+pub struct PushSettings {
     #[arg(long)]
     pub context: Option<PathBuf>,
     #[arg(long)]
@@ -48,8 +45,8 @@ pub struct PushConfig {
     #[arg(long)]
     pub minimum_memory_mib: Option<i32>,
     /// Image capability; repeat for multiple capabilities.
-    #[arg(long = "capability", visible_alias = "capabilities")]
-    pub capabilities: Option<Vec<ImageCapability>>,
+    #[arg(long = "capability", visible_alias = "capabilities", value_parser = parse_capability)]
+    pub capabilities: Option<Vec<String>>,
     #[arg(long)]
     pub egress: Option<String>,
     #[arg(long)]
@@ -65,341 +62,257 @@ pub struct PushConfig {
     pub run_timeout_seconds: Option<i32>,
     #[arg(long)]
     pub terminate_timeout_seconds: Option<i32>,
-    #[arg(long, value_parser = parse_duration)]
-    #[serde(default, deserialize_with = "deserialize_optional_duration")]
+    #[arg(long, value_parser = humantime::parse_duration)]
+    #[serde(with = "humantime_serde")]
     pub timeout: Option<Duration>,
 }
 
-impl PushConfig {
-    pub fn overlay(self, lower: &Self) -> Self {
-        Self {
-            context: self.context.or_else(|| lower.context.clone()),
-            artifact_bucket: self
-                .artifact_bucket
-                .or_else(|| lower.artifact_bucket.clone()),
-            build_role_arn: self.build_role_arn.or_else(|| lower.build_role_arn.clone()),
-            base_image: self.base_image.or_else(|| lower.base_image.clone()),
-            minimum_memory_mib: self.minimum_memory_mib.or(lower.minimum_memory_mib),
-            capabilities: self.capabilities.or_else(|| lower.capabilities.clone()),
-            egress: self.egress.or_else(|| lower.egress.clone()),
-            keep_versions: self.keep_versions.or(lower.keep_versions),
-            tags: self.tags.or_else(|| lower.tags.clone()),
-            port: self.port.or(lower.port),
-            ready_timeout_seconds: self.ready_timeout_seconds.or(lower.ready_timeout_seconds),
-            run_timeout_seconds: self.run_timeout_seconds.or(lower.run_timeout_seconds),
-            terminate_timeout_seconds: self
-                .terminate_timeout_seconds
-                .or(lower.terminate_timeout_seconds),
-            timeout: self.timeout.or(lower.timeout),
-        }
-    }
-
-    fn resolve(self) -> Result<ResolvedPushConfig, ClankerError> {
-        let artifact_bucket = required_string(self.artifact_bucket, "push.artifact-bucket")?;
-        let build_role_arn = required_string(self.build_role_arn, "push.build-role-arn")?;
-        let tags = Tags::parse(self.tags.as_deref().unwrap_or_default())?;
-        Ok(ResolvedPushConfig {
-            context: self.context.unwrap_or_else(|| DEFAULT_CONTEXT.into()),
-            artifact_bucket,
-            build_role_arn,
-            base_image: non_empty_string(self.base_image, "push.base-image")?
-                .unwrap_or_else(|| DEFAULT_BASE_IMAGE.into()),
-            minimum_memory_mib: self.minimum_memory_mib,
-            capabilities: self.capabilities.unwrap_or_default(),
-            egress: non_empty_string(self.egress, "push.egress")?
-                .unwrap_or_else(|| DEFAULT_BUILD_EGRESS.into()),
-            keep_versions: self.keep_versions,
-            tags,
-            port: self.port.unwrap_or(DEFAULT_PORT),
-            ready_timeout_seconds: self
-                .ready_timeout_seconds
-                .unwrap_or(DEFAULT_READY_TIMEOUT_SECONDS),
-            run_timeout_seconds: self
-                .run_timeout_seconds
-                .unwrap_or(DEFAULT_RUN_TIMEOUT_SECONDS),
-            terminate_timeout_seconds: self
-                .terminate_timeout_seconds
-                .unwrap_or(DEFAULT_TERMINATE_TIMEOUT_SECONDS),
-            timeout: self.timeout.unwrap_or_else(|| Duration::from_hours(1)),
-        })
+impl Settings for PushSettings {
+    fn validate(&self) -> Result<(), ClankerError> {
+        validate_non_empty(self.artifact_bucket.as_deref(), "push.artifact-bucket")?;
+        validate_non_empty(self.build_role_arn.as_deref(), "push.build-role-arn")?;
+        validate_non_empty(self.base_image.as_deref(), "push.base-image")?;
+        validate_non_empty(self.egress.as_deref(), "push.egress")?;
+        self.tags()?;
+        self.capabilities()?;
+        Ok(())
     }
 }
 
-#[derive(Clone, Debug)]
-struct ResolvedPushConfig {
-    context: PathBuf,
-    artifact_bucket: String,
-    build_role_arn: String,
-    base_image: String,
-    minimum_memory_mib: Option<i32>,
-    capabilities: Vec<ImageCapability>,
-    egress: String,
-    keep_versions: Option<usize>,
-    tags: Tags,
-    port: i32,
-    ready_timeout_seconds: i32,
-    run_timeout_seconds: i32,
-    terminate_timeout_seconds: i32,
-    timeout: Duration,
+impl PushSettings {
+    pub(crate) fn artifact_bucket(&self) -> Result<&str, ClankerError> {
+        required(self.artifact_bucket.as_deref(), "push.artifact-bucket")
+    }
+
+    pub(crate) fn build_role_arn(&self) -> Result<&str, ClankerError> {
+        required(self.build_role_arn.as_deref(), "push.build-role-arn")
+    }
+
+    pub(crate) fn tags(&self) -> Result<BTreeMap<String, String>, ClankerError> {
+        parse_key_values(self.tags.as_deref().unwrap_or_default(), "tag", true)
+    }
+
+    pub(crate) fn capabilities(&self) -> Result<Vec<Capability>, ClankerError> {
+        self.capabilities
+            .iter()
+            .flatten()
+            .map(|capability| {
+                Capability::try_parse(capability).map_err(|_| {
+                    ClankerError::InvalidConfig(format!("unknown image capability `{capability}`"))
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout.unwrap_or(DEFAULT_TIMEOUT)
+    }
+    pub(crate) fn base_image(&self) -> &str {
+        self.base_image.as_deref().unwrap_or(DEFAULT_BASE_IMAGE)
+    }
+    pub(crate) fn egress(&self) -> &str {
+        self.egress.as_deref().unwrap_or(DEFAULT_BUILD_EGRESS)
+    }
+    pub(crate) fn port(&self) -> i32 {
+        self.port.unwrap_or(DEFAULT_PORT)
+    }
+    pub(crate) fn ready_timeout_seconds(&self) -> i32 {
+        self.ready_timeout_seconds
+            .unwrap_or(DEFAULT_READY_TIMEOUT_SECONDS)
+    }
+    pub(crate) fn run_timeout_seconds(&self) -> i32 {
+        self.run_timeout_seconds
+            .unwrap_or(DEFAULT_RUN_TIMEOUT_SECONDS)
+    }
+    pub(crate) fn terminate_timeout_seconds(&self) -> i32 {
+        self.terminate_timeout_seconds
+            .unwrap_or(DEFAULT_TERMINATE_TIMEOUT_SECONDS)
+    }
+}
+
+fn parse_capability(value: &str) -> Result<String, String> {
+    Capability::try_parse(value)
+        .map(|_| value.to_owned())
+        .map_err(|_| format!("unknown image capability `{value}`"))
 }
 
 pub(super) async fn execute<T: MicroVmClient>(
-    args: PushArgs,
-    project: &Project,
+    options: &PushOptions,
+    config: &ProjectConfig,
     format: OutputFormat,
     client: &T,
 ) -> Result<(), ClankerError> {
     let mut progress = ReleaseProgress::new(format);
-    let result = push(args, project, client, |status| progress.report(status)).await?;
+    let result = push(options, config, client, |status| progress.report(status)).await?;
     render(format, &result, || format!("✓ Released {}", result.release))
 }
 
-async fn push<T: MicroVmClient, U: FnMut(&ReleaseStatus)>(
-    args: PushArgs,
-    project: &Project,
+async fn push<T, F>(
+    options: &PushOptions,
+    config: &ProjectConfig,
     client: &T,
-    report: U,
-) -> Result<ReleaseStatus, ClankerError> {
-    let image = project.config.resolve_image(None)?;
-    let config = args.config.overlay(&image.push).resolve()?;
-    let artifact = load_artifact(
-        args.source.as_deref(),
-        args.bundle.as_deref(),
-        &config,
-        project,
-    )?;
-    let role = Arn::parse(&config.build_role_arn)?;
-    let identifier = image.target(&config.build_role_arn)?.image_arn;
-
-    eprintln!("› Publishing artifact {}", &artifact.digest[..12]);
-
-    let published = client
-        .publish_image(PublishImageRequest {
-            image_identifier: identifier.clone(),
-            name: image.name.clone(),
-            bundle: artifact.bytes,
-            bundle_digest: artifact.digest.clone(),
-            artifact_bucket: config.artifact_bucket.clone(),
-            configuration: resolve_image_configuration(
-                &config,
-                &image.region,
-                &artifact.digest,
-                &role,
-            )?,
-            tags: config.tags.clone(),
-        })
-        .await?;
-
-    let release = Release::new(
-        &image.name,
-        identifier.clone(),
-        &published.image_version,
-        Some(artifact.digest),
-        Some(published.artifact_uri),
+    report: F,
+) -> Result<ReleaseStatus, ClankerError>
+where
+    T: MicroVmClient,
+    F: FnMut(&ReleaseStatus),
+{
+    let settings = config.push.merge(&options.settings)?;
+    let path = config.resolve(
+        options
+            .source
+            .as_deref()
+            .or(settings.context.as_deref())
+            .unwrap_or(Path::new(DEFAULT_CONTEXT)),
     );
-
-    let result = wait_for_release(client, release, None, config.timeout, report).await?;
-    if let Some(keep) = config.keep_versions {
-        client
-            .prune_image_versions(PruneImageVersionsRequest {
-                image_identifier: identifier,
-                versions_to_keep: keep,
-            })
-            .await?;
-    }
-    Ok(result)
-}
-
-fn load_artifact(
-    source: Option<&std::path::Path>,
-    bundle: Option<&std::path::Path>,
-    config: &ResolvedPushConfig,
-    project: &Project,
-) -> Result<Artifact, ClankerError> {
-    let path = project.resolve(bundle.or(source).unwrap_or(&config.context));
-    let result = if bundle.is_some() {
-        Artifact::from_zip(&path)
-    } else {
-        Artifact::load(&path)
-    };
-    result.map_err(|source| ClankerError::Io {
+    let bundle = Artifact::load(&path).map_err(|source| ClankerError::Io {
         action: format!("load artifact from {}", path.display()),
         source,
-    })
-}
+    })?;
+    let spec = config.image_spec(&settings, &bundle.digest)?;
 
-fn resolve_image_configuration(
-    config: &ResolvedPushConfig,
-    region: &str,
-    digest: &str,
-    role: &Arn,
-) -> Result<ImageConfiguration, ClankerError> {
-    Ok(ImageConfiguration {
-        base_image_arn: Arn::base_image(region, &config.base_image)?,
-        build_role_arn: role.clone(),
-        description: format!("Bundle {digest}"),
-        minimum_memory_mib: config.minimum_memory_mib,
-        capabilities: config.capabilities.clone(),
-        egress_network_connector: Arn::network_connector(region, &config.egress)?,
-        hooks: ImageHooks {
-            port: config.port,
-            ready_timeout_seconds: config.ready_timeout_seconds,
-            run_timeout_seconds: config.run_timeout_seconds,
-            terminate_timeout_seconds: config.terminate_timeout_seconds,
-        },
-    })
+    eprintln!("› Publishing artifact {}", &bundle.digest[..12]);
+
+    let published = client.publish(&spec, &bundle).await?;
+    let release = Release::new(&spec.name, spec.arn.clone(), &published.version)
+        .with_artifact(bundle.digest, published.artifact_uri);
+
+    let status = wait_for_release(client, release, None, settings.timeout(), report).await?;
+    if let Some(keep) = settings.keep_versions {
+        client.prune(&spec.arn, keep).await?;
+    }
+    Ok(status)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::{FakeMicroVmClient, MicroVmCall, MicroVmClientError};
-    use crate::test_support::{ObservedImageReleaseBuilder, ProjectBuilder};
+    use crate::client::{Call, FakeMicroVmClient, MicroVmClientError};
+    use crate::test_support::{self, active};
     use std::fs;
-    use std::path::Path;
     use tempfile::TempDir;
 
-    fn project(directory: &Path) -> Project {
+    /// A real project file plus a source directory to bundle.
+    fn project(directory: &Path) -> ProjectConfig {
         fs::write(directory.join("app.py"), "print('hi')").unwrap();
-        ProjectBuilder::new(directory)
-            .push(PushConfig {
-                artifact_bucket: Some("artifacts".into()),
-                build_role_arn: Some("arn:aws:iam::123456789012:role/build".into()),
-                keep_versions: Some(1),
-                tags: Some(vec!["team=platform".into()]),
-                ..PushConfig::default()
-            })
-            .build()
+        test_support::project(
+            directory,
+            "[push]\nartifact-bucket = \"artifacts\"\nbuild-role-arn = \"arn:aws:iam::123456789012:role/build\"\nkeep-versions = 1\ntags = [\"team=platform\"]\n",
+        )
+    }
+
+    fn active_client() -> FakeMicroVmClient {
+        FakeMicroVmClient::default().observed([Ok(Some(active("1")))])
     }
 
     #[test]
-    fn config_overlay_uses_higher_priority_values_and_resolves_defaults() {
-        let lower = PushConfig {
-            context: Some("root".into()),
-            port: Some(8000),
-            artifact_bucket: Some("bucket".into()),
-            build_role_arn: Some("arn:aws:iam::123456789012:role/build".into()),
-            ..PushConfig::default()
-        };
-        let higher = PushConfig {
-            context: Some("cli".into()),
-            ..PushConfig::default()
-        };
+    fn push_defaults_apply_once_values_are_resolved() {
+        let settings = PushSettings::default();
 
-        let resolved = higher.overlay(&lower).resolve().unwrap();
-
-        assert_eq!(resolved.context, Path::new("cli"));
-        assert_eq!(resolved.port, 8000);
-        assert_eq!(resolved.base_image, DEFAULT_BASE_IMAGE);
-        assert_eq!(resolved.timeout, Duration::from_hours(1));
+        assert_eq!(settings.base_image(), DEFAULT_BASE_IMAGE);
+        assert_eq!(settings.egress(), DEFAULT_BUILD_EGRESS);
+        assert_eq!(settings.port(), DEFAULT_PORT);
+        assert_eq!(settings.timeout(), DEFAULT_TIMEOUT);
     }
 
     #[test]
-    fn invalid_push_values_are_rejected_when_config_is_resolved() {
-        for config in [
-            PushConfig {
+    fn invalid_push_values_are_rejected() {
+        for settings in [
+            PushSettings {
                 artifact_bucket: Some(String::new()),
-                build_role_arn: Some("arn:aws:iam::123456789012:role/build".into()),
-                ..PushConfig::default()
+                ..PushSettings::default()
             },
-            PushConfig {
-                artifact_bucket: Some("bucket".into()),
-                build_role_arn: Some(" ".into()),
-                ..PushConfig::default()
+            PushSettings {
+                base_image: Some(" ".into()),
+                ..PushSettings::default()
             },
-            PushConfig {
-                artifact_bucket: Some("bucket".into()),
-                build_role_arn: Some("arn:aws:iam::123456789012:role/build".into()),
+            PushSettings {
                 tags: Some(vec!["missing-equals".into()]),
-                ..PushConfig::default()
+                ..PushSettings::default()
+            },
+            PushSettings {
+                capabilities: Some(vec!["NOPE".into()]),
+                ..PushSettings::default()
             },
         ] {
-            assert!(matches!(
-                config.resolve(),
-                Err(ClankerError::InvalidConfig(_))
-            ));
+            assert!(
+                matches!(settings.validate(), Err(ClankerError::InvalidConfig(_))),
+                "accepted {settings:?}"
+            );
         }
     }
 
     #[tokio::test]
     async fn push_publishes_waits_and_prunes() {
         let directory = TempDir::new().unwrap();
-        let project = project(directory.path());
-        let client = FakeMicroVmClient::builder()
-            .inspection_responses([Ok(Some(ObservedImageReleaseBuilder::active("1")))])
-            .build();
+        let config = project(directory.path());
+        let digest = Artifact::load(directory.path()).unwrap().digest;
+        let client = active_client();
 
-        let result = push(PushArgs::default(), &project, &client, |_| {})
+        let result = push(&PushOptions::default(), &config, &client, |_| {})
             .await
             .unwrap();
 
         assert_eq!(result.release, "demo@1");
-        assert_eq!(result.version_status, "ACTIVE");
+        assert_eq!(result.observation.version_status, "ACTIVE");
         let calls = client.calls();
-        assert_eq!(calls.len(), 3);
-        let MicroVmCall::PublishImage(request) = &calls[0] else {
-            panic!("expected publish call, got {calls:?}");
+        let [
+            Call::Publish(spec),
+            Call::Observe(..),
+            Call::Prune(arn, keep),
+        ] = calls.as_slice()
+        else {
+            panic!("expected publish, observe and prune, got {calls:?}");
         };
         assert_eq!(
-            request.image_identifier.as_str(),
+            spec.arn.as_str(),
             "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
         );
+        assert_eq!(spec.tags.get("team").map(String::as_str), Some("platform"));
+        assert_eq!(spec.configuration.hooks.port, 9000);
+        assert_eq!(spec.configuration.description, format!("Bundle {digest}"));
         assert_eq!(
-            request
-                .tags
-                .clone()
-                .into_inner()
-                .get("team")
-                .map(String::as_str),
-            Some("platform")
+            arn.as_str(),
+            "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
         );
-        assert_eq!(request.configuration.hooks.port, 9000);
-        assert_eq!(
-            request.configuration.description,
-            format!("Bundle {}", request.bundle_digest)
-        );
-        let MicroVmCall::PruneImageVersions(request) = &calls[2] else {
-            panic!("expected prune call, got {calls:?}");
-        };
-        assert_eq!(request.versions_to_keep, 1);
+        assert_eq!(*keep, 1);
     }
 
     #[tokio::test]
     async fn push_uploads_a_prebuilt_zip_without_repacking_it() {
         let directory = TempDir::new().unwrap();
-        let project = project(directory.path());
+        let config = project(directory.path());
         let zip_path = directory.path().join("image.zip");
         let expected = Artifact::load(directory.path()).unwrap().bytes;
         fs::write(&zip_path, &expected).unwrap();
-        let client = FakeMicroVmClient::builder()
-            .inspection_responses([Ok(Some(ObservedImageReleaseBuilder::active("1")))])
-            .build();
-        let args = PushArgs {
+        let client = active_client();
+        let options = PushOptions {
             source: Some(zip_path),
-            ..PushArgs::default()
+            ..PushOptions::default()
         };
 
-        push(args, &project, &client, |_| {}).await.unwrap();
+        push(&options, &config, &client, |_| {}).await.unwrap();
 
         let calls = client.calls();
-        let MicroVmCall::PublishImage(request) = &calls[0] else {
-            panic!("expected publish call, got {calls:?}");
+        let Call::Publish(spec) = &calls[0] else {
+            panic!("expected publish, got {calls:?}");
         };
-        assert_eq!(request.bundle, expected);
+        assert_eq!(
+            spec.configuration.description,
+            format!("Bundle {}", crate::util::sha256_hex(&expected))
+        );
     }
 
     #[tokio::test]
     async fn publish_failures_surface() {
         let directory = TempDir::new().unwrap();
-        let project = project(directory.path());
-        let client = FakeMicroVmClient::builder()
-            .publish_responses([Err(MicroVmClientError::Service {
-                operation: "create image",
-                message: "boom".into(),
-            })])
-            .build();
+        let config = project(directory.path());
+        let client = FakeMicroVmClient::default().published([Err(MicroVmClientError::Service {
+            operation: "create image",
+            message: "boom".into(),
+        })]);
 
-        let error = push(PushArgs::default(), &project, &client, |_| {})
+        let error = push(&PushOptions::default(), &config, &client, |_| {})
             .await
             .unwrap_err();
 
@@ -409,13 +322,10 @@ mod tests {
     #[tokio::test]
     async fn prune_failures_surface_after_release() {
         let directory = TempDir::new().unwrap();
-        let project = project(directory.path());
-        let client = FakeMicroVmClient::builder()
-            .inspection_responses([Ok(Some(ObservedImageReleaseBuilder::active("1")))])
-            .prune_responses([Err(MicroVmClientError::InvalidVersionsToKeep)])
-            .build();
+        let config = project(directory.path());
+        let client = active_client().pruned([Err(MicroVmClientError::InvalidVersionsToKeep)]);
 
-        let error = push(PushArgs::default(), &project, &client, |_| {})
+        let error = push(&PushOptions::default(), &config, &client, |_| {})
             .await
             .unwrap_err();
 

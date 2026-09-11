@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 toml = { workspace = true }
 humantime = { workspace = true }
+humantime-serde = { workspace = true }
 zip = { workspace = true }
 
 [package.metadata.dist]
