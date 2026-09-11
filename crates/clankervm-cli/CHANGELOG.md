@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.2...clankervm-v0.1.3) - 2026-09-11
+
+### Added
+
+- Better logs command and lower latency in shell sessions  ([#5](https://github.com/jcarver989/clankervm/pull/5))
+
 ## [0.1.2](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.1...clankervm-v0.1.2) - 2026-09-11
 
 ### Added
