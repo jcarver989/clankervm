@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.1...clankervm-v0.1.2) - 2026-09-11
+
+### Added
+
+- Add support for shell, logs, build image hooks and more.  ([#4](https://github.com/jcarver989/clankervm/pull/4))
+
 ## [0.1.1](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.0...clankervm-v0.1.1) - 2026-08-28
 
 ### Other
