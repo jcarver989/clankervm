@@ -36,6 +36,10 @@ pub struct HookServerArgs {
     #[arg(long, env = "CLANKERVM_READY_HOOK_PAYLOAD", hide_env_values = true)]
     pub ready_hook_payload: Option<String>,
 
+    /// Command JSON, run once on the first post-snapshot validate hook request.
+    #[arg(long, env = "CLANKERVM_VALIDATE_HOOK_PAYLOAD", hide_env_values = true)]
+    pub validate_hook_payload: Option<String>,
+
     /// Seconds to wait after SIGTERM before killing the run command.
     #[arg(
         long,
@@ -61,6 +65,12 @@ pub async fn run(args: HookServerArgs) -> Result<(), HookServerError> {
         let command =
             serde_json::from_str(&payload).map_err(|_| HookServerError::InvalidReadyPayload)?;
         server = server.with_ready_command(command);
+    }
+
+    if let Some(payload) = args.validate_hook_payload {
+        let command =
+            serde_json::from_str(&payload).map_err(|_| HookServerError::InvalidValidatePayload)?;
+        server = server.with_validate_command(command);
     }
 
     let listener = TcpListener::bind(args.port)

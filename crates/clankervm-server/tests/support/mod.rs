@@ -23,6 +23,7 @@ pub const IGNORE_TERM_TRAP: &str = "trap '' TERM";
 pub struct TestServerBuilder {
     terminate_grace_period: Duration,
     ready_payload: Option<Value>,
+    validate_payload: Option<Value>,
 }
 
 impl TestServerBuilder {
@@ -30,6 +31,7 @@ impl TestServerBuilder {
         Self {
             terminate_grace_period: Duration::from_millis(100),
             ready_payload: None,
+            validate_payload: None,
         }
     }
 
@@ -43,12 +45,20 @@ impl TestServerBuilder {
         self
     }
 
+    pub fn validate_command(mut self, payload: Value) -> Self {
+        self.validate_payload = Some(payload);
+        self
+    }
+
     pub async fn start(self) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut server = LambdaHookServer::with_terminate_grace_period(self.terminate_grace_period);
         if let Some(payload) = self.ready_payload {
             server = server.with_ready_command(serde_json::from_value(payload).unwrap());
+        }
+        if let Some(payload) = self.validate_payload {
+            server = server.with_validate_command(serde_json::from_value(payload).unwrap());
         }
         let join = tokio::spawn(server.serve(listener));
         TestServer {
@@ -69,6 +79,10 @@ impl TestServerBuilder {
         let port = available_port();
         let mut command = Command::new(env!("CARGO_BIN_EXE_clankervm-server"));
         command.env_remove("CLANKERVM_READY_HOOK_PAYLOAD");
+        command.env_remove("CLANKERVM_VALIDATE_HOOK_PAYLOAD");
+        if let Some(payload) = self.validate_payload {
+            command.env("CLANKERVM_VALIDATE_HOOK_PAYLOAD", payload.to_string());
+        }
         if let Some(payload) = self.ready_payload {
             command.env("CLANKERVM_READY_HOOK_PAYLOAD", payload.to_string());
         }
@@ -172,6 +186,10 @@ impl TestServerProcess {
             Some(run_request(&payload)),
         )
         .await
+    }
+
+    pub async fn post(&self, path: &str) -> TestResponse {
+        request(&self.client, &self.base_url, Method::POST, path, None).await
     }
 
     pub fn pid(&self) -> Pid {

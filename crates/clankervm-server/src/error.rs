@@ -9,6 +9,8 @@ use std::io;
 pub enum HookServerError {
     #[error("invalid ready hook payload")]
     InvalidReadyPayload,
+    #[error("invalid validate hook payload")]
+    InvalidValidatePayload,
     #[error("failed to bind hook server: {0}")]
     Bind(#[source] io::Error),
     #[error("hook server failed: {0}")]

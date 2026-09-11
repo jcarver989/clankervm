@@ -57,6 +57,25 @@ Do not place secret values in image configuration or leave credentials or per-ru
 identities in the snapshotted state. With no ready payload, `/ready` retains its
 immediate-success behavior. See the [AWS image lifecycle](https://docs.aws.amazon.com/lambda/latest/dg/microvms-images.html).
 
+## Post-snapshot validation
+
+The CLI's `[microvm.image.hooks.validate]` table supplies command JSON through
+`CLANKERVM_VALIDATE_HOOK_PAYLOAD`; manual deployments can set that image environment
+variable or pass `--validate-hook-payload`. The payload has the same shape as `ready`
+and `run`. Without it, `/validate` returns 404.
+
+The first `/validate` request starts the command once, after initialization succeeds.
+The endpoint returns 503 immediately while validation runs and 200 after success;
+concurrent/repeated polls never restart it. Failure stops the server with an error.
+Validation and `/run` cannot execute concurrently, but a normal restored VM can run
+without invoking validation. Shutdown signals and `/terminate` cancel its process
+group. AWS enforces the validation deadline; the server does not add an execution timer.
+
+Validation executes on a restored validation VM, not before the seed snapshot.
+Use it to exercise snapshot retrieval and verify restore behavior, not to seed files
+for future runs. Its configuration is persisted in the image: use secret references,
+not secret values, just as for initialization.
+
 ## Recipes
 
 ### Secrets

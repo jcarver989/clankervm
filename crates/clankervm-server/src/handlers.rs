@@ -26,6 +26,26 @@ pub async fn ready(State(state): State<Arc<HookServerState>>) -> impl IntoRespon
     }
 }
 
+pub async fn validate(State(state): State<Arc<HookServerState>>) -> Result<Response, ApiError> {
+    if state.validate()? {
+        Ok((
+            StatusCode::OK,
+            Json(StatusBody {
+                status: "validated",
+            }),
+        )
+            .into_response())
+    } else {
+        Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(StatusBody {
+                status: "validating",
+            }),
+        )
+            .into_response())
+    }
+}
+
 pub async fn run(
     State(state): State<Arc<HookServerState>>,
     request: Result<Json<RunHookRequest>, JsonRejection>,
