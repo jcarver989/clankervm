@@ -28,6 +28,122 @@ async fn ready_is_available_and_terminate_stops_an_idle_server() {
 }
 
 #[tokio::test]
+async fn ready_initializes_once_without_blocking_polls_or_consuming_the_run() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("output");
+    let release = directory.path().join("release");
+    let server = TestServerBuilder::new().ready_command(json!({
+        "command": "/bin/sh",
+        "args": ["-c", "printf '%s\\n' \"$1\" >> \"$OUTPUT\"; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done", "init", "$(literal argument)"],
+        "environment": { "OUTPUT": output, "RELEASE": release }
+    })).start().await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let (first, second) = tokio::join!(server.post("/ready"), server.post("/ready"));
+        for response in [first, second] {
+            assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.body, json!({ "status": "initializing" }));
+        }
+        assert_eq!(
+            server.run(json!({"command": "/usr/bin/true"})).await.status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    })
+    .await
+    .expect("initialization blocked hook requests");
+
+    fs::write(release, "continue").unwrap();
+    server.wait_until_ready().await;
+    assert_eq!(server.post("/ready").await.status, StatusCode::OK);
+    assert_eq!(fs::read_to_string(output).unwrap(), "$(literal argument)\n");
+    assert_eq!(
+        server
+            .run(json!({ "command": "/usr/bin/true" }))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    server.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn ready_failure_stops_the_server_instead_of_reporting_readiness() {
+    for (payload, spawn_failure) in [
+        (json!({"command": "/path/that/does/not/exist"}), true),
+        (
+            json!({"command": "/bin/sh", "args": ["-c", "exit 7"]}),
+            false,
+        ),
+    ] {
+        let server = TestServerBuilder::new()
+            .ready_command(payload)
+            .start()
+            .await;
+        let error = server.wait().await.unwrap_err();
+        if spawn_failure {
+            assert!(matches!(error, HookServerError::CommandSpawn(_)));
+        } else {
+            assert!(matches!(error, HookServerError::CommandFailed));
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminate_cancels_initialization_and_waits_for_its_process_group() {
+    let script = RunScriptBuilder::new("ready-with-child")
+        .trap(IGNORE_TERM_TRAP)
+        .build();
+    let server = TestServerBuilder::new()
+        .ready_command(script.payload())
+        .start()
+        .await;
+    let (command_pid, child_pid) = script.pids().await;
+    assert_eq!(
+        server.post("/ready").await.status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(server.post("/terminate").await.status, StatusCode::OK);
+    server.wait().await.unwrap();
+    wait_until_gone(command_pid).await;
+    wait_until_gone(child_pid).await;
+}
+
+#[tokio::test]
+async fn ready_payload_is_loaded_from_the_image_environment() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("initialized");
+    let server = TestServerBuilder::new()
+        .terminate_grace_period(Duration::from_secs(1))
+        .ready_command(json!({
+            "command": "/bin/sh",
+            "args": ["-c", "printf '%s' \"$GREETING\" > \"$OUTPUT\""],
+            "environment": {"OUTPUT": output, "GREETING": "hello"}
+        }))
+        .start_process();
+    server.wait_until_ready().await;
+    assert_eq!(fs::read_to_string(output).unwrap(), "hello");
+    assert_eq!(
+        server.run(json!({"command": "/usr/bin/true"})).await.status,
+        StatusCode::OK
+    );
+    assert!(server.wait_with_output().await.status.success());
+}
+
+#[tokio::test]
+async fn invalid_ready_environment_fails_without_exposing_the_payload() {
+    let server = TestServerBuilder::new()
+        .terminate_grace_period(Duration::from_secs(1))
+        .ready_command(json!({"command": "/usr/bin/true", "environment": SECRET}))
+        .start_process();
+    let output = server.wait_with_output().await;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid ready hook payload"));
+    assert!(!stderr.contains(SECRET));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(SECRET));
+}
+
+#[tokio::test]
 async fn run_passes_arguments_environment_and_microvm_id_to_the_command() {
     let directory = tempdir().unwrap();
     let executable = executable_script(
@@ -121,10 +237,10 @@ async fn invalid_payloads_do_not_expose_environment_secrets() {
     let server = TestServerBuilder::new().start().await;
     let payloads = [
         json!({
-            "command": "/bin/true",
+            "command": "/usr/bin/true",
             "environment": { "GITHUB_TOKEN": format!("{SECRET}\u{0}") }
         }),
-        json!({ "command": "/bin/true", "environment": SECRET }),
+        json!({ "command": "/usr/bin/true", "environment": SECRET }),
     ];
 
     for payload in payloads {

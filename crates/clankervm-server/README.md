@@ -38,6 +38,25 @@ aws lambda-microvms run-microvm \
   --run-hook-payload "$RUN_HOOK_PAYLOAD"
 ```
 
+## Pre-snapshot initialization
+
+The CLI's `[microvm.image.hooks.ready]` table supplies an optional initialization
+command via the `CLANKERVM_READY_HOOK_PAYLOAD` image environment variable. It contains
+the same JSON shape as the run payload above. For manual use, set that variable when
+creating/updating the image, or pass `--ready-hook-payload` to the server.
+
+Initialization starts once when the server starts. `/ready` returns HTTP 503
+immediately while it runs, then HTTP 200 after successful completion. A failed
+initialization stops the server with a nonzero exit status. `/run` is unavailable
+until initialization succeeds, and the later run command is still independent.
+Shutdown signals and `/terminate` cancel initialization and wait for its process
+group. The command inherits the server's user and working directory.
+
+AWS snapshots the completed state, so restored MicroVMs do not repeat initialization.
+Do not place secret values in image configuration or leave credentials or per-run
+identities in the snapshotted state. With no ready payload, `/ready` retains its
+immediate-success behavior. See the [AWS image lifecycle](https://docs.aws.amazon.com/lambda/latest/dg/microvms-images.html).
+
 ## Recipes
 
 ### Secrets

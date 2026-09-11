@@ -7,6 +7,8 @@ use std::io;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HookServerError {
+    #[error("invalid ready hook payload")]
+    InvalidReadyPayload,
     #[error("failed to bind hook server: {0}")]
     Bind(#[source] io::Error),
     #[error("hook server failed: {0}")]
@@ -31,6 +33,13 @@ pub(crate) struct ApiError {
 }
 
 impl ApiError {
+    pub(crate) fn not_ready() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "initialization has not completed".into(),
+        }
+    }
+
     pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

@@ -13,8 +13,17 @@ pub struct StatusBody {
     status: &'static str,
 }
 
-pub async fn ready() -> impl IntoResponse {
-    (StatusCode::OK, Json(StatusBody { status: "ready" }))
+pub async fn ready(State(state): State<Arc<HookServerState>>) -> impl IntoResponse {
+    if state.is_ready() {
+        (StatusCode::OK, Json(StatusBody { status: "ready" }))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(StatusBody {
+                status: "initializing",
+            }),
+        )
+    }
 }
 
 pub async fn run(
@@ -25,6 +34,10 @@ pub async fn run(
 
     if request.microvm_id.trim().is_empty() {
         return Err(ApiError::bad_request("microvmId must not be empty"));
+    }
+
+    if !state.is_ready() {
+        return Err(ApiError::not_ready());
     }
 
     if !state.claim_run() {

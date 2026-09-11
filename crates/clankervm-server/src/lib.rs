@@ -32,6 +32,10 @@ pub struct HookServerArgs {
     #[arg(long, env = "RUST_LOG", default_value = "info")]
     pub log_filter: String,
 
+    /// Initialization command JSON, run once before the image is ready for snapshotting.
+    #[arg(long, env = "CLANKERVM_READY_HOOK_PAYLOAD", hide_env_values = true)]
+    pub ready_hook_payload: Option<String>,
+
     /// Seconds to wait after SIGTERM before killing the run command.
     #[arg(
         long,
@@ -50,15 +54,22 @@ pub async fn run(args: HookServerArgs) -> Result<(), HookServerError> {
         .finish()
         .try_init();
 
+    let mut server = LambdaHookServer::with_terminate_grace_period(Duration::from_secs(
+        args.terminate_grace_period,
+    ));
+    if let Some(payload) = args.ready_hook_payload {
+        let command =
+            serde_json::from_str(&payload).map_err(|_| HookServerError::InvalidReadyPayload)?;
+        server = server.with_ready_command(command);
+    }
+
     let listener = TcpListener::bind(args.port)
         .await
         .map_err(HookServerError::Bind)?;
 
     info!(address = %listener.local_addr().map_err(HookServerError::Bind)?, "Lambda MicroVM hook server listening");
     let shutdown = shutdown_signal()?;
-    LambdaHookServer::with_terminate_grace_period(Duration::from_secs(args.terminate_grace_period))
-        .serve_with_shutdown(listener, shutdown)
-        .await
+    server.serve_with_shutdown(listener, shutdown).await
 }
 
 fn shutdown_signal() -> Result<impl Future<Output = ()> + Send + 'static, HookServerError> {
