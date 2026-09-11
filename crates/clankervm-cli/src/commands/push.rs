@@ -24,14 +24,14 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Default, Args)]
 pub struct PushOptions {
-    /// Prepared directory to ZIP or an existing ZIP file. Overrides push.context.
+    /// Prepared directory to ZIP or an existing ZIP file. Overrides microvm.image.artifact.source.
     #[arg(value_name = "PATH")]
     pub source: Option<PathBuf>,
     #[command(flatten)]
     pub settings: PushSettings,
 }
 
-/// Push settings, shared by `--flags` and the `[push]` table.
+/// Push settings resolved from the project file and CLI flags.
 #[derive(Clone, Debug, Default, Args, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 pub struct PushSettings {
@@ -72,16 +72,22 @@ pub struct PushSettings {
 
 impl Settings for PushSettings {
     fn validate(&self) -> Result<(), ClankerError> {
-        validate_non_empty(self.artifact_bucket.as_deref(), "push.artifact-bucket")?;
-        validate_non_empty(self.artifact_prefix.as_deref(), "push.artifact-prefix")?;
+        validate_non_empty(
+            self.artifact_bucket.as_deref(),
+            "microvm.image.artifact.s3-bucket",
+        )?;
+        validate_non_empty(
+            self.artifact_prefix.as_deref(),
+            "microvm.image.artifact.s3-prefix",
+        )?;
         if self.artifact_prefix().is_empty() {
             return Err(ClankerError::InvalidConfig(
-                "push.artifact-prefix must name at least one key segment".into(),
+                "microvm.image.artifact.s3-prefix must name at least one key segment".into(),
             ));
         }
-        validate_non_empty(self.build_role_arn.as_deref(), "push.build-role-arn")?;
-        validate_non_empty(self.base_image.as_deref(), "push.base-image")?;
-        validate_non_empty(self.egress.as_deref(), "push.egress")?;
+        validate_non_empty(self.build_role_arn.as_deref(), "microvm.image.iam-role")?;
+        validate_non_empty(self.base_image.as_deref(), "microvm.image.base-image")?;
+        validate_non_empty(self.egress.as_deref(), "microvm.image.network.egress")?;
         self.tags()?;
         self.capabilities()?;
         Ok(())
@@ -90,7 +96,10 @@ impl Settings for PushSettings {
 
 impl PushSettings {
     pub(crate) fn artifact_bucket(&self) -> Result<&str, ClankerError> {
-        required(self.artifact_bucket.as_deref(), "push.artifact-bucket")
+        required(
+            self.artifact_bucket.as_deref(),
+            "microvm.image.artifact.s3-bucket",
+        )
     }
 
     /// The key prefix bundles are uploaded under, without a trailing slash.
@@ -102,7 +111,7 @@ impl PushSettings {
     }
 
     pub(crate) fn build_role_arn(&self) -> Result<&str, ClankerError> {
-        required(self.build_role_arn.as_deref(), "push.build-role-arn")
+        required(self.build_role_arn.as_deref(), "microvm.image.iam-role")
     }
 
     pub(crate) fn tags(&self) -> Result<BTreeMap<String, String>, ClankerError> {
@@ -214,7 +223,7 @@ mod tests {
         fs::write(directory.join("app.py"), "print('hi')").unwrap();
         test_support::project(
             directory,
-            "[push]\nartifact-bucket = \"artifacts\"\nbuild-role-arn = \"arn:aws:iam::123456789012:role/build\"\nkeep-versions = 1\ntags = [\"team=platform\"]\n",
+            "[microvm.image]\niam-role = \"arn:aws:iam::123456789012:role/build\"\ntags = [\"team=platform\"]\n[microvm.image.artifact]\ns3-bucket = \"artifacts\"\n[microvm.image.versions]\nmax = 1\n",
         )
     }
 
@@ -338,7 +347,7 @@ mod tests {
         fs::write(directory.path().join("app.py"), "print('hi')").unwrap();
         let config = test_support::project(
             directory.path(),
-            "[push]\nartifact-bucket = \"artifacts\"\nbuild-role-arn = \"arn:aws:iam::123456789012:role/build\"\nartifact-prefix = \"employee-clanker/\"\n",
+            "[microvm.image]\niam-role = \"arn:aws:iam::123456789012:role/build\"\n[microvm.image.artifact]\ns3-bucket = \"artifacts\"\ns3-prefix = \"employee-clanker/\"\n",
         );
         let client = active_client();
 

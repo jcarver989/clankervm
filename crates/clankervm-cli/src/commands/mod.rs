@@ -53,9 +53,9 @@ pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
 
     let config = ProjectConfig::load(&cli.config, cli.region)?;
     let mut sdk_loader = aws_config::defaults(BehaviorVersion::latest())
-        .region(Region::new(config.image.region.clone()));
+        .region(Region::new(config.aws.region.clone()));
 
-    if let Some(profile) = &config.image.profile {
+    if let Some(profile) = &config.aws.profile {
         sdk_loader = sdk_loader.profile_name(profile);
     }
 

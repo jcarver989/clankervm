@@ -13,24 +13,28 @@ use support::{
 };
 use tempfile::TempDir;
 
-/// A `[push]` and `[run]` configuration with every deployment role set.
-const FULL_CONFIG: &str = r#"[push]
-artifact-bucket = "bucket"
-build-role-arn = "arn:aws:iam::123456789012:role/build"
-[run]
+/// An image and run configuration with every deployment role set.
+const FULL_CONFIG: &str = r#"[microvm.image]
+iam-role = "arn:aws:iam::123456789012:role/build"
+[microvm.image.artifact]
+s3-bucket = "bucket"
+[microvm.run]
 command = ["echo", "hello"]
 environment = ["GREETING=hello"]
-execution-role-arn = "arn:aws:iam::123456789012:role/run"
-log-group = "/demo/runs"
+iam-role = "arn:aws:iam::123456789012:role/run"
+[microvm.run.logs]
+group = "/demo/runs"
 "#;
 
-/// A `[push]` that releases and then prunes everything but the newest version.
-const PRUNING_CONFIG: &str = r#"[push]
-artifact-bucket = "bucket"
-build-role-arn = "arn:aws:iam::123456789012:role/build"
-keep-versions = 1
-[run]
-execution-role-arn = "arn:aws:iam::123456789012:role/run"
+/// An image that releases and then prunes everything but the newest version.
+const PRUNING_CONFIG: &str = r#"[microvm.image]
+iam-role = "arn:aws:iam::123456789012:role/build"
+[microvm.image.artifact]
+s3-bucket = "bucket"
+[microvm.image.versions]
+max = 1
+[microvm.run]
+iam-role = "arn:aws:iam::123456789012:role/run"
 "#;
 
 #[test]
@@ -155,7 +159,7 @@ fn run_requires_separator_before_the_command() {
 }
 
 #[test]
-fn push_flags_mirror_flat_config_values() {
+fn push_flags_populate_command_settings() {
     let ClankerCommand::Push(push) = parse(&[
         "push",
         "--context",
@@ -265,15 +269,15 @@ fn init_only_creates_the_project_file() {
     let output = run_cli(directory.path(), &["init", "--name", "demo"], "");
     assert!(output.status.success());
     let text = fs::read_to_string(directory.path().join("clankervm.toml")).unwrap();
-    assert!(text.starts_with("schema-version = 1"), "{text}");
+    assert!(text.starts_with("[aws]"), "{text}");
     for expected in [
         "name = \"demo\"",
-        "[image]",
-        "[push]",
-        "# artifact-bucket = ",
-        "# build-role-arn = ",
-        "[run]",
-        "# execution-role-arn = ",
+        "[microvm]",
+        "[microvm.image]",
+        "[microvm.image.artifact]",
+        "# s3-bucket = ",
+        "[microvm.run]",
+        "# iam-role = ",
     ] {
         assert!(text.contains(expected), "missing {expected} in {text}");
     }
@@ -300,7 +304,7 @@ fn status_resolves_the_image_from_the_execution_role_alone() {
     let directory = TempDir::new().unwrap();
     write_config(
         directory.path(),
-        "[run]\nexecution-role-arn = \"arn:aws:iam::123456789012:role/run\"\n",
+        "[microvm.run]\niam-role = \"arn:aws:iam::123456789012:role/run\"\n",
     );
     let fake = FakeAws::start(vec![
         Response::ok(IMAGE_CREATED),
@@ -786,7 +790,7 @@ fn run_json(directory: &Path, args: &[&str], url: &str) -> Value {
 fn write_config(directory: &Path, sections: &str) {
     fs::write(
         directory.join("clankervm.toml"),
-        format!("schema-version = 1\n[image]\nname = \"demo\"\nregion = \"us-east-1\"\n{sections}"),
+        format!("[aws]\nregion = \"us-east-1\"\n[microvm]\nname = \"demo\"\n{sections}"),
     )
     .unwrap();
 }

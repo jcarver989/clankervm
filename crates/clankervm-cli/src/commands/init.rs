@@ -53,26 +53,27 @@ pub(super) fn execute(
 
 fn template(args: &InitArgs) -> String {
     let mut text = format!(
-        "schema-version = 1\n\n[image]\nname = {}\nregion = {}\n\n[push]\ncontext = \".\"\n",
-        toml_string(&args.name),
-        toml_string(&args.region)
+        "[aws]\nregion = {}\n\n[microvm]\nname = {}\n\n[microvm.image]\n",
+        toml_string(&args.region),
+        toml_string(&args.name)
     );
     entry(
         &mut text,
-        "artifact-bucket",
-        args.artifact_bucket.as_deref(),
-        "my-artifact-bucket",
-    );
-    entry(
-        &mut text,
-        "build-role-arn",
+        "iam-role",
         args.build_role_arn.as_deref(),
         "arn:aws:iam::123456789012:role/clankervm-build",
     );
-    text.push_str("\n[run]\n");
+    text.push_str("\n[microvm.image.artifact]\nsource = \".\"\n");
     entry(
         &mut text,
-        "execution-role-arn",
+        "s3-bucket",
+        args.artifact_bucket.as_deref(),
+        "my-artifact-bucket",
+    );
+    text.push_str("\n[microvm.run]\n");
+    entry(
+        &mut text,
+        "iam-role",
         args.execution_role_arn.as_deref(),
         "arn:aws:iam::123456789012:role/clankervm-run",
     );
@@ -113,8 +114,8 @@ mod tests {
         fs::write(&path, template(&args)).unwrap();
         let config = ProjectConfig::load(&path, None).unwrap();
 
-        assert_eq!(config.image.name, args.name);
-        assert_eq!(config.image.region, args.region);
+        assert_eq!(config.name, args.name);
+        assert_eq!(config.aws.region, args.region);
         assert_eq!(config.push.artifact_bucket, args.artifact_bucket);
     }
 }

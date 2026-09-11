@@ -25,7 +25,7 @@ pub struct RunOptions {
     pub settings: RunSettings,
 }
 
-/// Run settings, shared by `--flags` and the `[run]` table.
+/// Run settings resolved from the project file and CLI flags.
 #[derive(Clone, Debug, Default, Args, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 pub struct RunSettings {
@@ -50,10 +50,10 @@ impl Settings for RunSettings {
         if self.command.is_some() {
             self.command(&[])?;
         }
-        validate_non_empty(self.execution_role_arn.as_deref(), "run.execution-role-arn")?;
-        validate_non_empty(self.ingress.as_deref(), "run.ingress")?;
-        validate_non_empty(self.egress.as_deref(), "run.egress")?;
-        validate_non_empty(self.log_group.as_deref(), "run.log-group")?;
+        validate_non_empty(self.execution_role_arn.as_deref(), "microvm.run.iam-role")?;
+        validate_non_empty(self.ingress.as_deref(), "microvm.run.network.ingress")?;
+        validate_non_empty(self.egress.as_deref(), "microvm.run.network.egress")?;
+        validate_non_empty(self.log_group.as_deref(), "microvm.run.logs.group")?;
         self.environment()?;
         Ok(())
     }
@@ -61,7 +61,7 @@ impl Settings for RunSettings {
 
 impl RunSettings {
     pub(crate) fn execution_role_arn(&self) -> Result<&str, ClankerError> {
-        required(self.execution_role_arn.as_deref(), "run.execution-role-arn")
+        required(self.execution_role_arn.as_deref(), "microvm.run.iam-role")
     }
 
     /// Run-hook environment: `key=value` pairs whose values may be empty.
@@ -73,7 +73,7 @@ impl RunSettings {
         )
     }
 
-    /// The executable and arguments to run: `arguments` win over `run.command`.
+    /// The executable and arguments to run: `arguments` win over `microvm.run.command`.
     pub(crate) fn command<'a>(
         &'a self,
         arguments: &'a [String],
@@ -85,12 +85,12 @@ impl RunSettings {
         };
         let (executable, arguments) = command.split_first().ok_or_else(|| {
             ClankerError::InvalidConfig(
-                "run command is required; pass it after `--` or set run.command".into(),
+                "run command is required; pass it after `--` or set microvm.run.command".into(),
             )
         })?;
         if executable.trim().is_empty() {
             return Err(ClankerError::InvalidConfig(
-                "run.command executable cannot be empty".into(),
+                "microvm.run.command executable cannot be empty".into(),
             ));
         }
         Ok((executable, arguments))
@@ -194,10 +194,10 @@ mod tests {
     use crate::test_support::{ROLE, project};
     use tempfile::TempDir;
 
-    /// A real project file, so the `[run]` schema and precedence are covered too.
+    /// A real project file, so the `[microvm.run]` schema and precedence are covered too.
     fn config(run: &str) -> (TempDir, ProjectConfig) {
         let directory = TempDir::new().unwrap();
-        let config = project(directory.path(), &format!("[run]\n{run}"));
+        let config = project(directory.path(), &format!("[microvm.run]\n{run}"));
         (directory, config)
     }
 
@@ -262,7 +262,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_applies_project_defaults() {
-        let (_directory, config) = config(&format!("{ROLE}log-group = \"/demo/runs\"\n"));
+        let (_directory, config) = config(&format!(
+            "{ROLE}[microvm.run.logs]\ngroup = \"/demo/runs\"\n"
+        ));
         let client = FakeMicroVmClient::default().launched([Ok(Launch {
             microvm_id: "microvm-7".into(),
             image_version: "3".into(),

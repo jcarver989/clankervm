@@ -23,39 +23,80 @@ This creates `clankervm.toml`. Pass `--force` to replace an existing file.
 
 ## Configuration
 
-A minimal project file:
+A project file with all supported settings:
 
 ```toml
-schema-version = 1
-
-[image]
-name = "my-runner"
+[aws]
 region = "us-west-2"
-# profile = "my-aws-profile"
+profile = "my-aws-profile"
 
-[push]
-context = "."
-artifact-bucket = "my-microvm-artifacts"
-build-role-arn = "arn:aws:iam::123456789012:role/MicroVmBuildRole"
+[microvm]
+name = "my-runner"
 
-[run]
-execution-role-arn = "arn:aws:iam::123456789012:role/MicroVmExecutionRole"
-# command = ["/usr/local/bin/my-job", "--job-id", "42"]
-# environment = ["LOG_LEVEL=info"]
-# log-group = "/my-runner/microvms"
+[microvm.image]
+base-image = "al2023-1"
+minimum-memory-mib = 512
+os-capabilities = ["ALL"]
+iam-role = "arn:aws:iam::123456789012:role/clankervm-build"
+tags = ["team=platform"]
+
+[microvm.image.artifact]
+source = "."
+s3-bucket = "my-artifact-bucket"
+s3-prefix = "clankervm"
+
+[microvm.image.network]
+egress = "INTERNET_EGRESS"
+
+[microvm.image.hooks]
+port = 9000
+ready-timeout = "5m"
+run-timeout = "1m"
+terminate-timeout = "30s"
+
+[microvm.image.versions]
+max = 10
+wait-timeout = "1h"
+
+[microvm.run]
+iam-role = "arn:aws:iam::123456789012:role/clankervm-execution"
+command = ["/usr/local/bin/my-job", "--job-id", "42"]
+environment = ["LOG_LEVEL=info"]
+max-duration = 3600
+
+[microvm.run.network]
+ingress = "NO_INGRESS"
+egress = "INTERNET_EGRESS"
+
+[microvm.run.logs]
+group = "/my-runner/microvms"
+stream = "..."
+since = "30m"
+limit = 1000
+timeout = "1m"
 ```
 
-Optional tables: `[status]` and `[logs]`.
+Only `aws.region` and `microvm.name` are required to load a project. Image and
+run tables are optional; each command checks its required settings (for example,
+push needs an artifact bucket and image IAM role). Unknown fields are rejected.
 
-Command-line settings override TOML settings. The main settings are:
+Command-line settings override TOML settings; existing flag names are unchanged.
+For example, `--artifact-bucket` overrides `microvm.image.artifact.s3-bucket`,
+`--build-role-arn` overrides `microvm.image.iam-role`, and `--execution-role-arn`
+overrides `microvm.run.iam-role`. Lists supplied on the command line replace
+configured lists rather than appending to them. `--region` overrides `aws.region`.
 
-- `[push]`: `context`, `artifact-bucket`, `artifact-prefix`, `build-role-arn`,
-  `base-image`, `minimum-memory-mib`, `capabilities`, `egress`,
-  `keep-versions`, `tags`, `port`, hook timeouts, and `timeout`.
-- `[run]`: `command`, `environment`, `execution-role-arn`, `ingress`, `egress`,
-  `max-duration`, and `log-group`.
-- `[status]`: `timeout`.
-- `[logs]`: `log-group`, `log-stream`, `since`, `limit`, and `timeout`.
+Artifact sources are resolved relative to the project file, defaulting to `.`.
+Hook timeouts use duration strings and must fit in a whole number of signed
+32-bit seconds; the corresponding CLI flags still accept integer seconds.
+`microvm.image.versions.max` controls pruning after a successful push; omitting
+it disables pruning. `wait-timeout` applies to both push and `status --wait`
+(default `1h`), and each command's `--timeout` overrides it.
+
+`microvm.run.logs.group` sets both the launch log destination and the group read
+by `logs`. If omitted, logs uses `/aws/lambda-microvms/<name>`. `stream` defaults
+to the MicroVM ID and only affects log reads, as do `since`, `limit`, and `timeout`.
+`max-duration` is in seconds; log `since` and `timeout` use duration strings.
 
 Use one configuration file per image:
 
@@ -66,7 +107,7 @@ clankervm --config images/worker.toml run -- ./worker
 
 ## Push an image
 
-Use `[push].context`, or pass a directory or ZIP explicitly:
+Use `microvm.image.artifact.source`, or pass a directory or ZIP explicitly:
 
 ```sh
 clankervm push
@@ -118,7 +159,7 @@ clankervm run --release my-runner@42 -- ./job
 clankervm run --env LOG_LEVEL=debug --env DRY_RUN=false -- ./job
 ```
 
-Use `[run].command` when a command should be the default. A command after `--`
+Use `microvm.run.command` when a command should be the default. A command after `--`
 overrides it. Environment entries use `KEY=VALUE`.
 
 Useful run options:

@@ -1,4 +1,3 @@
-use super::RunSettings;
 use crate::client::{LogEvent, LogPage, LogQuery, LogWindow, MicroVmClient, MicroVmClientError};
 use crate::config::{ProjectConfig, Settings};
 use crate::output::render;
@@ -38,15 +37,17 @@ pub struct LogsOptions {
     pub settings: LogsSettings,
 }
 
-/// Logs settings, shared by `--flags` and the `[logs]` table.
+/// Logs settings, shared by `--flags` and the `[microvm.run.logs]` table.
 #[derive(Clone, Debug, Default, Args, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 pub struct LogsSettings {
     /// Log group to read; defaults to the group run streams to.
     #[arg(long)]
+    #[serde(rename = "group")]
     pub log_group: Option<String>,
     /// Log stream to read; defaults to the MicroVM id.
     #[arg(long)]
+    #[serde(rename = "stream")]
     pub log_stream: Option<String>,
     /// Read events from this long before now, for example 30m.
     #[arg(long, value_parser = humantime::parse_duration)]
@@ -63,14 +64,14 @@ pub struct LogsSettings {
 
 impl Settings for LogsSettings {
     fn validate(&self) -> Result<(), ClankerError> {
-        validate_non_empty(self.log_group.as_deref(), "logs.log-group")?;
-        validate_non_empty(self.log_stream.as_deref(), "logs.log-stream")?;
+        validate_non_empty(self.log_group.as_deref(), "microvm.run.logs.group")?;
+        validate_non_empty(self.log_stream.as_deref(), "microvm.run.logs.stream")?;
         if self
             .limit
             .is_some_and(|limit| !(1..=MAX_LIMIT).contains(&limit))
         {
             return Err(ClankerError::InvalidConfig(format!(
-                "logs.limit must be between 1 and {MAX_LIMIT}"
+                "microvm.run.logs.limit must be between 1 and {MAX_LIMIT}"
             )));
         }
         Ok(())
@@ -78,12 +79,10 @@ impl Settings for LogsSettings {
 }
 
 impl LogsSettings {
-    /// The group to read: the `[logs]` table or `--log-group`, then the group
-    /// `run` streams to, then the one AWS uses by default.
-    pub(crate) fn log_group(&self, run: &RunSettings, image: &str) -> String {
+    /// The shared run log group or `--log-group`, then the AWS default.
+    pub(crate) fn log_group(&self, image: &str) -> String {
         self.log_group
             .clone()
-            .or_else(|| run.log_group.clone())
             .unwrap_or_else(|| format!("{DEFAULT_GROUP_PREFIX}/{image}"))
     }
 
@@ -142,7 +141,7 @@ struct Destination {
 impl Destination {
     fn new(settings: &LogsSettings, config: &ProjectConfig, microvm_id: &str) -> Self {
         Self {
-            group: settings.log_group(&config.run, &config.image.name),
+            group: settings.log_group(&config.name),
             stream: settings.log_stream(microvm_id),
             limit: settings.limit(),
             timeout: settings.timeout(),
@@ -350,10 +349,13 @@ mod tests {
     use crate::test_support::{LogEventBuilder, ROLE, project};
     use tempfile::TempDir;
 
-    /// A project whose `[run]` role resolves the account, like every command.
+    /// A project whose `[microvm.run]` role resolves the account, like every command.
     fn config(sections: &str) -> (TempDir, ProjectConfig) {
         let directory = TempDir::new().unwrap();
-        let config = project(directory.path(), &format!("[run]\n{ROLE}{sections}"));
+        let config = project(
+            directory.path(),
+            &format!("[microvm.run]\n{ROLE}{sections}"),
+        );
         (directory, config)
     }
 
@@ -407,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_newest_events_are_read_from_the_run_group() {
-        let (_directory, config) = config("log-group = \"/demo/runs\"\n");
+        let (_directory, config) = config("[microvm.run.logs]\ngroup = \"/demo/runs\"\n");
         let client = FakeMicroVmClient::default().log_events([Ok(page(
             [
                 LogEventBuilder::new("first\n").at(10).build(),
@@ -447,10 +449,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_logs_table_and_the_flags_override_the_run_group() {
-        let (_directory, config) = config(
-            "log-group = \"/demo/runs\"\n[logs]\nlog-group = \"/demo/other\"\nlog-stream = \"stack\"\nlimit = 5\n",
-        );
+    async fn flags_override_the_shared_run_logs_table() {
+        let (_directory, config) =
+            config("[microvm.run.logs]\ngroup = \"/demo/other\"\nstream = \"stack\"\nlimit = 5\n");
         let client = FakeMicroVmClient::default();
 
         let configured = options("microvm-7");
@@ -559,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_stream_names_the_streams_the_group_has() {
-        let (_directory, config) = config("log-group = \"/demo/runs\"\n");
+        let (_directory, config) = config("[microvm.run.logs]\ngroup = \"/demo/runs\"\n");
         let client = FakeMicroVmClient::default()
             .log_events([Err(MicroVmClientError::NoLogStream {
                 group: "/demo/runs".into(),
@@ -631,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn follow_prints_each_event_once_and_keeps_reading() {
-        let (_directory, config) = config("log-group = \"/demo/runs\"\n");
+        let (_directory, config) = config("[microvm.run.logs]\ngroup = \"/demo/runs\"\n");
         let client = FakeMicroVmClient::default().log_events([
             Ok(page(
                 [
@@ -745,14 +746,14 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("logs.limit must be between 1 and 10000"),
+                .contains("microvm.run.logs.limit must be between 1 and 10000"),
             "{error}"
         );
     }
 
     #[tokio::test]
     async fn an_empty_stream_is_reported_as_such() {
-        let (_directory, config) = config("log-group = \"/demo/runs\"\n");
+        let (_directory, config) = config("[microvm.run.logs]\ngroup = \"/demo/runs\"\n");
         let client = FakeMicroVmClient::default();
         let options = options("microvm-7");
         let destination = destination(&options, &config);
@@ -782,7 +783,7 @@ mod tests {
         let client = FakeMicroVmClient::default();
 
         let result = LogsResult {
-            log_group: config.logs.log_group(&config.run, &config.image.name),
+            log_group: config.logs.log_group(&config.name),
             log_stream: config.logs.log_stream("microvm-7"),
             events: snapshot(
                 &client,
@@ -821,7 +822,7 @@ mod tests {
 
     #[test]
     fn the_configured_lookback_moves_the_window_back() {
-        let (_directory, config) = config("[logs]\nsince = \"30m\"\n");
+        let (_directory, config) = config("[microvm.run.logs]\nsince = \"30m\"\n");
 
         assert_lookback(&config.logs.window(now()), 1800);
         assert_lookback(&config.logs.follow_window(now()), 1800);

@@ -1,13 +1,15 @@
-schema-version = 1
-
-[image]
-name = "test"
+[aws]
 region = "us-west-2"
 
-[push]
-context = "."
-# artifact-bucket = "my-artifact-bucket"
-# build-role-arn = "arn:aws:iam::123456789012:role/clankervm-build"
+[microvm]
+name = "test"
 
-[run]
-# execution-role-arn = "arn:aws:iam::123456789012:role/clankervm-run"
+[microvm.image]
+# iam-role = "arn:aws:iam::123456789012:role/clankervm-build"
+
+[microvm.image.artifact]
+source = "."
+# s3-bucket = "my-artifact-bucket"
+
+[microvm.run]
+# iam-role = "arn:aws:iam::123456789012:role/clankervm-run"

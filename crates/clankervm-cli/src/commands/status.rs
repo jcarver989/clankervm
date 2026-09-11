@@ -21,7 +21,7 @@ pub struct StatusOptions {
     pub settings: StatusSettings,
 }
 
-/// Status settings, shared by `--flags` and the `[status]` table.
+/// Status settings resolved from image versions and CLI flags.
 #[derive(Clone, Debug, Default, Args, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 pub struct StatusSettings {
@@ -104,7 +104,7 @@ mod tests {
 
     fn config() -> (TempDir, ProjectConfig) {
         let directory = TempDir::new().unwrap();
-        let config = project(directory.path(), &format!("[run]\n{ROLE}"));
+        let config = project(directory.path(), &format!("[microvm.run]\n{ROLE}"));
         (directory, config)
     }
 

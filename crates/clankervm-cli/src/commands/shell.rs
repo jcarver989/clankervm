@@ -305,10 +305,10 @@ mod tests {
     /// The microvm every scripted test attaches to.
     const ATTACHED: &str = "microvm-1";
 
-    /// A project whose `[run]` role resolves the account, like every command.
+    /// A project whose `[microvm.run]` role resolves the account, like every command.
     fn config() -> (TempDir, ProjectConfig) {
         let directory = TempDir::new().unwrap();
-        let config = project(directory.path(), &format!("[run]\n{ROLE}"));
+        let config = project(directory.path(), &format!("[microvm.run]\n{ROLE}"));
         (directory, config)
     }
 
@@ -567,7 +567,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let config = project(
             directory.path(),
-            &format!("[run]\n{ROLE}\ncommand = [\"bash\", \"-l\"]"),
+            &format!("[microvm.run]\n{ROLE}\ncommand = [\"bash\", \"-l\"]"),
         );
         let client = launching();
         let (socket, _remote) = session().await;

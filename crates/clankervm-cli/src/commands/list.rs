@@ -69,7 +69,7 @@ async fn list<T: MicroVmClient>(
     let image = options
         .image
         .as_deref()
-        .map(|image| ImageIdentifier::parse(image, &config.image.region))
+        .map(|image| ImageIdentifier::parse(image, &config.aws.region))
         .transpose()?;
     let states = StateFilter::new(&options.states, options.all)?;
     let collected = tokio::time::timeout(
@@ -158,11 +158,11 @@ impl StateFilter {
 
 fn human(result: &ListResult, config: &ProjectConfig, options: &ListOptions) -> String {
     let mut lines = vec![
-        format!("Region:  {}", config.image.region),
+        format!("Region:  {}", config.aws.region),
         format!(
             "Profile: {}",
             config
-                .image
+                .aws
                 .profile
                 .as_deref()
                 .unwrap_or("default credential chain")
@@ -532,7 +532,8 @@ mod tests {
     #[test]
     fn human_output_names_the_region_and_the_credential_scope() {
         let directory = TempDir::new().unwrap();
-        let config = project(directory.path(), "profile = \"Production-PowerUser\"\n");
+        let mut config = project(directory.path(), "");
+        config.aws.profile = Some("Production-PowerUser".into());
         let empty = ListResult {
             microvms: Vec::new(),
         };

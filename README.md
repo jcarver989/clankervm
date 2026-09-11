@@ -33,7 +33,7 @@ clankervm run -- /usr/local/bin/my-job --job-id 42
 ```
 
 AWS credentials come from the standard AWS SDK credential chain. Use
-`image.profile` in `clankervm.toml` to select a named profile.
+`aws.profile` in `clankervm.toml` to select a named profile.
 
 ## Commands
 

@@ -9,8 +9,8 @@ use aws_smithy_types::DateTime;
 use std::fs;
 use std::path::Path;
 
-/// A `[run]` entry naming the account role tests resolve the image from.
-pub(crate) const ROLE: &str = "execution-role-arn = \"arn:aws:iam::123456789012:role/run\"\n";
+/// A `[microvm.run]` entry naming the account role tests resolve the image from.
+pub(crate) const ROLE: &str = "iam-role = \"arn:aws:iam::123456789012:role/run\"\n";
 
 /// The image ARN the shared fixtures report.
 pub(crate) const IMAGE_ARN: &str = "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo";
@@ -186,7 +186,7 @@ pub(crate) fn project(directory: &Path, sections: &str) -> ProjectConfig {
     let path = directory.join("clankervm.toml");
     fs::write(
         &path,
-        format!("schema-version = 1\n[image]\nname = \"demo\"\nregion = \"us-east-1\"\n{sections}"),
+        format!("[aws]\nregion = \"us-east-1\"\n[microvm]\nname = \"demo\"\n{sections}"),
     )
     .unwrap();
     ProjectConfig::load(&path, None).unwrap()
