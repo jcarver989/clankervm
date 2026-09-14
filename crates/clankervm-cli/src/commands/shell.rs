@@ -1,4 +1,5 @@
 use super::run::{RunOptions, plan_launch};
+use super::stop::terminate_and_confirm;
 use crate::client::{MicroVmClient, MicroVmDetails, SHELL_INGRESS};
 use crate::config::ProjectConfig;
 use crate::shell::{Event, Options, ShellError, attach, connect, events, is_interactive, request};
@@ -132,7 +133,7 @@ where
     // inside the session does not leave one behind.
     let terminated = launched && !options.keep;
     let cleanup = if terminated {
-        terminate(client, &microvm_id).await
+        terminate_and_confirm(client, &microvm_id, TERMINATE_TIMEOUT).await
     } else {
         Ok(())
     };
@@ -201,20 +202,6 @@ async fn ready<T: MicroVmClient>(
         microvm_id: microvm_id.to_owned(),
         timeout,
     })
-}
-
-/// Stops the MicroVM and waits for AWS to confirm it.
-async fn terminate<T: MicroVmClient>(client: &T, microvm_id: &str) -> Result<(), ClankerError> {
-    client.terminate(microvm_id).await?;
-    let confirmed = poll(client, microvm_id, TERMINATE_TIMEOUT, |described| {
-        Ok(match described {
-            None => Some(()),
-            Some(details) if details.state == MicrovmState::Terminated => Some(()),
-            Some(_) => None,
-        })
-    })
-    .await?;
-    confirmed.ok_or_else(|| ClankerError::MicroVmTerminationUnconfirmed(microvm_id.to_owned()))
 }
 
 /// Describes the MicroVM every poll interval until `check` finds what it is

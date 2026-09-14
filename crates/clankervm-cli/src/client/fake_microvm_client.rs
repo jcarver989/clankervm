@@ -1,7 +1,7 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogPage, LogQuery, MicroVmClient,
-    MicroVmDetails, MicroVmPage, Observation, Published, ShellToken,
+    ApplicationToken, ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogPage, LogQuery,
+    MicroVmClient, MicroVmDetails, MicroVmPage, Observation, Published, ShellToken,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
@@ -25,6 +25,7 @@ pub(crate) enum Call {
     LogEvents(LogQuery),
     Describe(String),
     ShellToken(String),
+    ApplicationToken(String, u16),
     Terminate(String),
 }
 
@@ -46,6 +47,7 @@ struct State {
     events: VecDeque<Result<LogPage, MicroVmClientError>>,
     described: VecDeque<Result<Option<MicroVmDetails>, MicroVmClientError>>,
     shell_tokens: VecDeque<Result<ShellToken, MicroVmClientError>>,
+    application_tokens: VecDeque<Result<ApplicationToken, MicroVmClientError>>,
     terminated: VecDeque<Result<(), MicroVmClientError>>,
     delay: Option<Duration>,
     calls: Vec<Call>,
@@ -121,6 +123,15 @@ impl FakeMicroVmClient {
         responses: impl IntoIterator<Item = Result<ShellToken, MicroVmClientError>>,
     ) -> Self {
         self.lock().shell_tokens = responses.into_iter().collect();
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn application_tokens(
+        self,
+        responses: impl IntoIterator<Item = Result<ApplicationToken, MicroVmClientError>>,
+    ) -> Self {
+        self.lock().application_tokens = responses.into_iter().collect();
         self
     }
 
@@ -283,6 +294,19 @@ impl MicroVmClient for FakeMicroVmClient {
                         .collect(),
                 })
             },
+        )
+        .await
+    }
+
+    async fn application_token(
+        &self,
+        microvm_id: &str,
+        port: u16,
+    ) -> Result<ApplicationToken, MicroVmClientError> {
+        self.answer(
+            Call::ApplicationToken(microvm_id.to_owned(), port),
+            |state| state.application_tokens.pop_front(),
+            || ApplicationToken::new("fake.application-token".into()),
         )
         .await
     }

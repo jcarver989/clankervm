@@ -806,6 +806,7 @@ dependencies = [
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-lambdamicrovms",
  "aws-sdk-s3",
+ "aws-sdk-sts",
  "aws-smithy-types",
  "base16ct 1.0.0",
  "clap",
@@ -813,7 +814,9 @@ dependencies = [
  "futures-util",
  "humantime",
  "humantime-serde",
+ "nix",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -822,6 +825,9 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "url",
+ "uuid",
+ "which",
  "zip",
 ]
 
@@ -3270,6 +3276,7 @@ version = "1.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
 ]
@@ -3399,6 +3406,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "which"
+version = "8.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

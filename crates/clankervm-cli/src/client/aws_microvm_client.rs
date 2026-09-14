@@ -1,7 +1,7 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogEvent, LogPage, LogQuery, MicroVmClient,
-    MicroVmDetails, MicroVmSummary, Observation, Published, ShellToken,
+    ApplicationToken, ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogEvent, LogPage, LogQuery,
+    MicroVmClient, MicroVmDetails, MicroVmSummary, Observation, Published, ShellToken,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
@@ -16,6 +16,7 @@ use aws_sdk_lambdamicrovms::operation::get_microvm_image_version::GetMicrovmImag
 use aws_sdk_lambdamicrovms::operation::terminate_microvm::TerminateMicrovmError;
 use aws_sdk_lambdamicrovms::types::{
     CloudWatchLogging, CodeArtifact, Logging, MicrovmImageVersionState, MicrovmImageVersionStatus,
+    PortSpecification,
 };
 use aws_sdk_s3::primitives::ByteStream;
 use aws_smithy_types::DateTime;
@@ -26,6 +27,7 @@ use std::future::Future;
 const LIST_PAGE_SIZE: i32 = 50;
 /// How long a shell token stays valid; it only has to outlive the handshake.
 const SHELL_TOKEN_MINUTES: i32 = 5;
+const APPLICATION_TOKEN_MINUTES: i32 = 30;
 /// Log streams requested per discovery page.
 const STREAMS_PAGE_SIZE: i32 = 50;
 /// Events one read may ask for.
@@ -316,10 +318,15 @@ impl MicroVmClient for AwsMicroVmClient {
             ));
         }
 
-        let output = builder
-            .send()
-            .await
-            .map_err(|error| MicroVmClientError::service("run MicroVM", &error))?;
+        let output = builder.send().await.map_err(|error| {
+            if error.as_service_error().is_some()
+                || matches!(&error, SdkError::ConstructionFailure(_))
+            {
+                MicroVmClientError::service("run MicroVM", &error)
+            } else {
+                MicroVmClientError::uncertain_launch(&error)
+            }
+        })?;
         Ok(Launch {
             microvm_id: output.microvm_id().into(),
             image_version: output.image_version,
@@ -433,17 +440,55 @@ impl MicroVmClient for AwsMicroVmClient {
         })
     }
 
+    async fn application_token(
+        &self,
+        microvm_id: &str,
+        port: u16,
+    ) -> Result<ApplicationToken, MicroVmClientError> {
+        let output = self
+            .microvms
+            .create_microvm_auth_token()
+            .microvm_identifier(microvm_id)
+            .expiration_in_minutes(APPLICATION_TOKEN_MINUTES)
+            .allowed_ports(PortSpecification::Port(i32::from(port)))
+            .send()
+            .await
+            .map_err(|error| {
+                MicroVmClientError::service("create application auth token", &error)
+            })?;
+        let value = output
+            .auth_token
+            .get("X-aws-proxy-auth")
+            .cloned()
+            .ok_or(MicroVmClientError::InvalidApplicationToken)?;
+        ApplicationToken::new(value)
+    }
+
     async fn terminate(&self, microvm_id: &str) -> Result<(), MicroVmClientError> {
-        self.optional(
-            "terminate MicroVM",
-            self.microvms
-                .terminate_microvm()
-                .microvm_identifier(microvm_id)
-                .send(),
-            TerminateMicrovmError::is_resource_not_found_exception,
-        )
-        .await
-        .map(|_| ())
+        let result = self
+            .microvms
+            .terminate_microvm()
+            .microvm_identifier(microvm_id)
+            .send()
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(TerminateMicrovmError::is_resource_not_found_exception) =>
+            {
+                Ok(())
+            }
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(TerminateMicrovmError::is_conflict_exception) =>
+            {
+                Err(MicroVmClientError::conflict("terminate MicroVM", &error))
+            }
+            Err(error) => Err(MicroVmClientError::service("terminate MicroVM", &error)),
+        }
     }
 }
 

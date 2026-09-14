@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 
 /// The ingress connector that makes AWS expose a MicroVM's pty.
 pub(crate) const SHELL_INGRESS: &str = "SHELL_INGRESS";
+pub(crate) const ALL_INGRESS: &str = "ALL_INGRESS";
 
 /// Everything AWS needs to build one image version, in AWS terms.
 #[derive(Clone, Debug, PartialEq)]
@@ -262,6 +263,33 @@ pub(crate) struct ShellToken {
     pub headers: HashMap<String, String>,
 }
 
+/// A port-scoped application credential. Debug deliberately redacts its value.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ApplicationToken(String);
+
+impl ApplicationToken {
+    pub(crate) fn new(value: String) -> Result<Self, MicroVmClientError> {
+        if value.is_empty()
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(MicroVmClientError::InvalidApplicationToken);
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ApplicationToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ApplicationToken([REDACTED])")
+    }
+}
+
 /// An image name or ARN accepted by AWS `image_identifier`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ImageIdentifier {
@@ -342,6 +370,13 @@ pub(crate) trait MicroVmClient: Send + Sync {
 
     /// A token that authenticates a `/shell` handshake.
     async fn shell_token(&self, microvm_id: &str) -> Result<ShellToken, MicroVmClientError>;
+
+    /// A fresh credential scoped to one application port.
+    async fn application_token(
+        &self,
+        microvm_id: &str,
+        port: u16,
+    ) -> Result<ApplicationToken, MicroVmClientError>;
 
     /// Stops one MicroVM; a MicroVM that is already gone is not an error.
     async fn terminate(&self, microvm_id: &str) -> Result<(), MicroVmClientError>;

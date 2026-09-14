@@ -26,6 +26,7 @@ aws-config = { version = "1.8.18", features = ["behavior-version-latest"] }
 aws-sdk-cloudwatchlogs = "1.150.0"
 aws-sdk-lambdamicrovms = "1.6.0"
 aws-sdk-s3 = "1.144.0"
+aws-sdk-sts = "1.99.0"
 aws-smithy-types = ">=1.4.9, <1.7.0"
 axum = "0.8.9"
 base16ct = { version = "1.0", features = ["alloc"] }
@@ -46,6 +47,9 @@ humantime-serde = "1.1"
 tokio = "1.52.3"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tokio-util = "0.7.18"
+url = "2.5"
+uuid = { version = "1.18", features = ["v4"] }
+which = "8.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zip = { version = "8.2", default-features = false, features = ["deflate"] }

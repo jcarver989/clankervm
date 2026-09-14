@@ -8,7 +8,7 @@ use aws_sdk_lambdamicrovms::types::{HookState, Hooks, MicrovmHooks, MicrovmImage
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -23,6 +23,7 @@ pub struct ProjectConfig {
     pub status: StatusSettings,
     pub run: RunSettings,
     pub logs: LogsSettings,
+    pub connections: BTreeMap<String, ConnectionSettings>,
     root: PathBuf,
     ready: Option<ImageHookConfig>,
     validate: Option<ImageHookConfig>,
@@ -33,6 +34,8 @@ pub struct ProjectConfig {
 pub struct AwsConfig {
     pub region: String,
     pub profile: Option<String>,
+    #[serde(rename = "expected-account-id")]
+    pub expected_account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +140,109 @@ struct RunConfig {
     max_duration: Option<i32>,
     network: RunNetworkConfig,
     logs: LogsSettings,
+    connect: BTreeMap<String, ConnectionSettings>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ConnectionProtocol {
+    Http,
+    Websocket,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub(crate) struct ConnectionSettings {
+    pub port: u16,
+    pub protocol: ConnectionProtocol,
+    #[serde(default = "default_connection_path")]
+    pub path: String,
+    #[serde(default = "default_connection_timeout", with = "humantime_serde")]
+    pub timeout: Duration,
+    pub client: Option<Vec<String>>,
+    #[serde(default)]
+    pub readiness: ReadinessSettings,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
+pub(crate) struct ReadinessSettings {
+    pub path: Option<String>,
+    pub expected_status: Option<u16>,
+    pub error_messages: BTreeMap<u16, String>,
+}
+
+fn default_connection_path() -> String {
+    "/".into()
+}
+fn default_connection_timeout() -> Duration {
+    Duration::from_secs(300)
+}
+
+impl ConnectionSettings {
+    pub(crate) fn readiness_path(&self) -> &str {
+        self.readiness.path.as_deref().unwrap_or(&self.path)
+    }
+
+    pub(crate) fn expected_status(&self) -> u16 {
+        self.readiness.expected_status.unwrap_or(200)
+    }
+
+    fn validate(&self, name: &str) -> Result<(), ClankerError> {
+        let prefix = format!("microvm.run.connect.{name}");
+        if self.port == 0 {
+            return Err(ClankerError::InvalidConfig(format!(
+                "{prefix}.port must be between 1 and 65535"
+            )));
+        }
+        if !(Duration::from_secs(1)..=Duration::from_mins(15)).contains(&self.timeout) {
+            return Err(ClankerError::InvalidConfig(format!(
+                "{prefix}.timeout must be between 1s and 15m"
+            )));
+        }
+        crate::application::validate_path(&self.path, &format!("{prefix}.path"))?;
+        if let Some(path) = &self.readiness.path {
+            crate::application::validate_path(path, &format!("{prefix}.readiness.path"))?;
+        }
+        match self.protocol {
+            ConnectionProtocol::Http if !(200..300).contains(&self.expected_status()) => {
+                return Err(ClankerError::InvalidConfig(format!(
+                    "{prefix}.readiness.expected-status must be a 2xx status"
+                )));
+            }
+            ConnectionProtocol::Websocket if self.readiness.expected_status.is_some() => {
+                return Err(ClankerError::InvalidConfig(format!(
+                    "{prefix}.readiness.expected-status is fixed at 101 for websocket connections"
+                )));
+            }
+            _ => {}
+        }
+        if self.readiness.error_messages.contains_key(&429)
+            || self
+                .readiness
+                .error_messages
+                .keys()
+                .any(|status| !(400..500).contains(status))
+        {
+            return Err(ClankerError::InvalidConfig(format!(
+                "{prefix}.readiness.error-messages keys must be 4xx statuses other than 429"
+            )));
+        }
+        if let Some(client) = &self.client {
+            let Some(executable) = client.first() else {
+                return Err(ClankerError::InvalidConfig(format!(
+                    "{prefix}.client must not be empty"
+                )));
+            };
+            if executable.trim().is_empty() {
+                return Err(ClankerError::InvalidConfig(format!(
+                    "{prefix}.client executable must not be empty"
+                )));
+            }
+            crate::application::validate_client_template(client, &prefix)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -157,6 +263,15 @@ impl TryFrom<ProjectFile> for ProjectConfig {
         }
         if let Some(validate) = &image.hooks.validate {
             validate.payload(&file.aws.region, "validate")?;
+        }
+        validate_expected_account(file.aws.expected_account_id.as_deref())?;
+        for (name, connection) in &run.connect {
+            if name.trim().is_empty() {
+                return Err(ClankerError::InvalidConfig(
+                    "connection names must not be empty".into(),
+                ));
+            }
+            connection.validate(name)?;
         }
         Ok(Self {
             aws: file.aws,
@@ -198,11 +313,23 @@ impl TryFrom<ProjectFile> for ProjectConfig {
                 log_group: run.logs.log_group.clone(),
             },
             logs: run.logs,
+            connections: run.connect,
             root: PathBuf::new(),
             ready: image.hooks.ready,
             validate: image.hooks.validate,
         })
     }
+}
+
+fn validate_expected_account(account: Option<&str>) -> Result<(), ClankerError> {
+    if account.is_some_and(|account| {
+        account.len() != 12 || !account.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        return Err(ClankerError::InvalidConfig(
+            "aws.expected-account-id must contain exactly 12 digits".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn hook_seconds(duration: Option<Duration>, field: &str) -> Result<Option<i32>, ClankerError> {
@@ -235,6 +362,15 @@ impl ProjectConfig {
         validate_non_empty(Some(&config.name), "microvm.name")?;
         validate_non_empty(Some(&config.aws.region), "aws.region")?;
         validate_non_empty(config.aws.profile.as_deref(), "aws.profile")?;
+        validate_expected_account(config.aws.expected_account_id.as_deref())?;
+        for (name, connection) in &config.connections {
+            if name.trim().is_empty() {
+                return Err(ClankerError::InvalidConfig(
+                    "connection names must not be empty".into(),
+                ));
+            }
+            connection.validate(name)?;
+        }
         config.push.validate()?;
         config.run.validate()?;
         config.status.validate()?;
@@ -244,6 +380,14 @@ impl ProjectConfig {
 
     pub(crate) fn resolve(&self, path: &Path) -> PathBuf {
         self.root.join(path)
+    }
+
+    pub(crate) fn connection(&self, name: &str) -> Result<&ConnectionSettings, ClankerError> {
+        self.connections.get(name).ok_or_else(|| {
+            ClankerError::InvalidConfig(format!(
+                "unknown connection `{name}`; configure [microvm.run.connect.{name}]"
+            ))
+        })
     }
 
     pub(crate) fn image_arn(&self, role: &Arn) -> Result<Arn, ClankerError> {
@@ -559,6 +703,34 @@ iam-role = "arn:aws:iam::123456789012:role/run"
         for value in ["'500ms'", "'2147483648s'", "'invalid'", "300"] {
             let text = format!("{CONFIG}\n[microvm.image.hooks]\nvalidate-timeout = {value}");
             assert!(toml::from_str::<ProjectConfig>(&text).is_err());
+        }
+    }
+
+    #[test]
+    fn named_connections_are_validated_and_resolved() {
+        let text = format!(
+            "{CONFIG}\n[microvm.run.connect.api]\nport = 3000\nprotocol = 'http'\npath = '/api'\ntimeout = '30s'\nclient = ['curl', '{{url}}', '{{auth-header}}', '{{port-header}}']\n[microvm.run.connect.api.readiness]\npath = '/healthz'\nexpected-status = 204\n"
+        );
+        let config: ProjectConfig = toml::from_str(&text).unwrap();
+        let api = config.connection("api").unwrap();
+        assert_eq!(api.port, 3000);
+        assert_eq!(api.protocol, ConnectionProtocol::Http);
+        assert_eq!(api.readiness_path(), "/healthz");
+        assert_eq!(api.expected_status(), 204);
+        assert_eq!(api.timeout, Duration::from_secs(30));
+
+        for fields in [
+            "port = 0\nprotocol = 'http'",
+            "port = 3000\nprotocol = 'tcp'",
+            "port = 3000\nprotocol = 'http'\npath = '//evil.test'",
+            "port = 3000\nprotocol = 'http'\ntimeout = '16m'",
+            "port = 3000\nprotocol = 'http'\nclient = ['curl', 'prefix-{url}']",
+        ] {
+            let text = format!("{CONFIG}\n[microvm.run.connect.invalid]\n{fields}");
+            assert!(
+                toml::from_str::<ProjectConfig>(&text).is_err(),
+                "accepted {fields}"
+            );
         }
     }
 

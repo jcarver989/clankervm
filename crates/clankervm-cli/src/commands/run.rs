@@ -1,5 +1,7 @@
+use super::connect;
+use super::stop::terminate_and_confirm;
 use crate::arn::Arn;
-use crate::client::{LaunchSpec, MicroVmClient};
+use crate::client::{ALL_INGRESS, LaunchSpec, MicroVmClient, MicroVmClientError};
 use crate::config::{ProjectConfig, Settings};
 use crate::output::render;
 use crate::payload::build_run_payload;
@@ -8,10 +10,38 @@ use crate::{ClankerError, OutputFormat};
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Duration;
+use tokio::time::Instant;
 
 const DEFAULT_INGRESS: &str = "NO_INGRESS";
 const DEFAULT_RUN_EGRESS: &str = "INTERNET_EGRESS";
 const DEFAULT_MAX_DURATION: i32 = 3600;
+
+#[derive(Clone, Debug, Default, Args)]
+pub struct RunCommandOptions {
+    /// Connect to this named application after launch.
+    #[arg(long)]
+    pub connect: Option<String>,
+    /// Override the selected application's readiness timeout.
+    #[arg(long, value_parser = humantime::parse_duration, requires = "connect")]
+    pub connect_timeout: Option<Duration>,
+    #[command(flatten)]
+    pub run: RunOptions,
+}
+
+impl std::ops::Deref for RunCommandOptions {
+    type Target = RunOptions;
+    fn deref(&self) -> &Self::Target {
+        &self.run
+    }
+}
+
+impl std::ops::DerefMut for RunCommandOptions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.run
+    }
+}
 
 #[derive(Clone, Debug, Default, Args)]
 pub struct RunOptions {
@@ -107,13 +137,88 @@ impl RunSettings {
     }
 }
 
-pub(super) async fn execute<T: MicroVmClient>(
-    options: &RunOptions,
+pub(super) fn preflight(
+    options: &RunCommandOptions,
     config: &ProjectConfig,
+    format: OutputFormat,
+) -> Result<(), ClankerError> {
+    if let Some(name) = &options.connect {
+        if options.run.client_token.is_some() {
+            return Err(ClankerError::InvalidConfig(
+                "--client-token cannot be combined with --connect".into(),
+            ));
+        }
+        let _ = connect::preflight(name, options.connect_timeout, &[], config, format)?;
+        let plan = plan_launch(&options.run, config)?;
+        let all_ingress = Arn::network_connector(&config.aws.region, ALL_INGRESS)?;
+        if plan.spec.ingress_network_connector != all_ingress {
+            return Err(ClankerError::InvalidConfig("run --connect requires --ingress ALL_INGRESS or microvm.run.network.ingress = \"ALL_INGRESS\"".into()));
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn execute<T: MicroVmClient>(
+    options: &RunCommandOptions,
+    config: &ProjectConfig,
+    config_path: &Path,
     format: OutputFormat,
     client: &T,
 ) -> Result<(), ClankerError> {
-    let result = run(options, config, client).await?;
+    if let Some(name) = &options.connect {
+        let selected = connect::preflight(name, options.connect_timeout, &[], config, format)?;
+        let mut plan = plan_launch(&options.run, config)?;
+        plan.spec.client_token = Some(uuid::Uuid::new_v4().to_string());
+        let deadline = Instant::now() + selected.timeout;
+        let mut signals = connect::ConnectionSignals::new()?;
+        let launched = tokio::select! {
+            result = tokio::time::timeout(
+                Duration::from_secs(10).min(selected.timeout),
+                client.launch(&plan.spec),
+            ) => match result {
+                Ok(Ok(launched)) => launched,
+                Ok(Err(MicroVmClientError::UncertainLaunch { .. })) | Err(_) => {
+                    return Err(ClankerError::UncertainLaunch);
+                }
+                Ok(Err(error)) => return Err(error.into()),
+            },
+            () = signals.cancelled() => return Err(ClankerError::UncertainLaunch),
+        };
+        let microvm_id = launched.microvm_id;
+        let selected = connect::SelectedConnection {
+            timeout: deadline.saturating_duration_since(Instant::now()),
+            ..selected
+        };
+        let mut handed_off = false;
+        let result = connect::connect(
+            client,
+            connect::ConnectionRequest {
+                microvm_id: &microvm_id,
+                name,
+                trailing: &[],
+                config,
+                config_path,
+                format,
+                launched: true,
+            },
+            selected,
+            &mut handed_off,
+            &mut signals,
+        )
+        .await;
+        if !handed_off
+            && let Err(startup) = &result
+            && let Err(cleanup) =
+                terminate_and_confirm(client, &microvm_id, Duration::from_secs(30)).await
+        {
+            return Err(ClankerError::StartupCleanup {
+                startup: startup.to_string(),
+                cleanup: cleanup.to_string(),
+            });
+        }
+        return result;
+    }
+    let result = run(&options.run, config, client).await?;
     render(format, &result, || {
         format!(
             "✓ Started MicroVM {}\n  Release: {}@{}{}",

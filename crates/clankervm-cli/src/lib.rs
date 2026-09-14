@@ -1,3 +1,4 @@
+mod application;
 mod arn;
 mod artifact;
 mod client;
@@ -5,6 +6,7 @@ mod commands;
 mod config;
 mod output;
 mod payload;
+mod readiness;
 mod release;
 mod shell;
 #[cfg(test)]
@@ -121,6 +123,33 @@ pub enum ClankerError {
         microvm_id: String,
         timeout: Duration,
     },
-    #[error("MicroVM `{0}` was not confirmed terminated; check it with `clankervm list`")]
+    #[error("MicroVM `{0}` was not confirmed terminated; check it with `clankervm inspect {0}`")]
     MicroVmTerminationUnconfirmed(String),
+    #[error("the AWS MicroVM endpoint was not a trusted endpoint for the configured region")]
+    UnsafeEndpoint,
+    #[error("AWS returned an invalid application authentication token")]
+    InvalidApplicationToken,
+    #[error("application readiness failed: {0}")]
+    ApplicationProbe(String),
+    #[error("timed out after {timeout:?} waiting for application on MicroVM `{microvm_id}`")]
+    ApplicationWaitTimeout {
+        microvm_id: String,
+        timeout: Duration,
+    },
+    #[error("the local connection client exited with status {0}")]
+    ClientExit(i32),
+    #[error(
+        "MicroVM launch was interrupted or timed out and its outcome is unknown\nDo not launch again blindly; use `clankervm list`, `clankervm inspect <id>`, and `clankervm stop <id>` to recover"
+    )]
+    UncertainLaunch,
+    #[error("application connection interrupted before handoff")]
+    Interrupted,
+    #[error("application startup failed: {startup}; cleanup also failed: {cleanup}")]
+    StartupCleanup { startup: String, cleanup: String },
+    #[error("the operation timed out")]
+    OperationTimeout,
+    #[error("failed to validate the AWS account: {0}")]
+    AccountValidation(String),
+    #[error("AWS account mismatch: expected {expected}, authenticated as {actual}")]
+    AccountMismatch { expected: String, actual: String },
 }

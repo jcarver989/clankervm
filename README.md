@@ -60,6 +60,12 @@ clankervm --format json list --all
 clankervm run -- /path/to/program ARG...
 clankervm run --release NAME@VERSION -- ./job
 
+# Connect to a named application, inspect, and stop it
+clankervm run --connect api --ingress ALL_INGRESS -- ./start-services
+clankervm connect MICROVM_ID api
+clankervm inspect MICROVM_ID
+clankervm stop MICROVM_ID --wait
+
 # Attach an interactive shell
 clankervm shell
 clankervm shell MICROVM_ID

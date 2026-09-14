@@ -45,7 +45,9 @@ fn help_exposes_release_workflow() {
     let output = run_cli(Path::new("."), &["--help"], "");
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    for command in ["init", "push", "status", "list", "run", "logs", "shell"] {
+    for command in [
+        "init", "push", "status", "list", "run", "connect", "inspect", "stop", "logs", "shell",
+    ] {
         assert!(text.contains(command), "missing {command} in {text}");
     }
     for removed in ["  bundle", "  wait"] {
@@ -157,8 +159,63 @@ fn run_requires_separator_before_the_command() {
     ]) else {
         panic!("expected run command");
     };
-    assert_eq!(run.arguments, ["command", "--command-option"]);
-    assert_eq!(run.settings.environment.unwrap(), ["GREETING=hello"]);
+    assert_eq!(run.run.arguments, ["command", "--command-option"]);
+    assert_eq!(run.run.settings.environment.unwrap(), ["GREETING=hello"]);
+}
+
+#[test]
+fn application_commands_parse_the_small_public_interface() {
+    let ClankerCommand::Connect(connect) = parse(&[
+        "connect",
+        "microvm-1",
+        "api",
+        "--connect-timeout",
+        "30s",
+        "--",
+        "--session",
+        "a b",
+    ]) else {
+        panic!("expected connect command");
+    };
+    assert_eq!(connect.vm_id, "microvm-1");
+    assert_eq!(connect.name, "api");
+    assert_eq!(
+        connect.connect_timeout,
+        Some(std::time::Duration::from_secs(30))
+    );
+    assert_eq!(connect.arguments, ["--session", "a b"]);
+
+    let ClankerCommand::Run(run) = parse(&[
+        "run",
+        "--connect",
+        "api",
+        "--connect-timeout",
+        "1m",
+        "--",
+        "remote",
+        "--flag",
+    ]) else {
+        panic!("expected run command");
+    };
+    assert_eq!(run.connect.as_deref(), Some("api"));
+    assert_eq!(
+        run.connect_timeout,
+        Some(std::time::Duration::from_secs(60))
+    );
+    assert_eq!(run.run.arguments, ["remote", "--flag"]);
+
+    assert!(matches!(
+        parse(&["inspect", "microvm-1"]),
+        ClankerCommand::Inspect(_)
+    ));
+    let ClankerCommand::Stop(stop) = parse(&["stop", "microvm-1", "--wait", "--timeout", "10s"])
+    else {
+        panic!("expected stop command");
+    };
+    assert!(stop.wait);
+    assert_eq!(stop.timeout, std::time::Duration::from_secs(10));
+
+    assert!(Cli::try_parse_from(["clankervm", "run", "--connect-timeout", "1m"]).is_err());
 }
 
 #[test]

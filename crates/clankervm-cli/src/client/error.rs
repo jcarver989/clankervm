@@ -8,10 +8,19 @@ pub enum MicroVmClientError {
         operation: &'static str,
         message: String,
     },
+    #[error("{operation} conflicted: {message}")]
+    Conflict {
+        operation: &'static str,
+        message: String,
+    },
+    #[error("run MicroVM outcome is unknown: {message}")]
+    UncertainLaunch { message: String },
     #[error("versions_to_keep must be at least 1")]
     InvalidVersionsToKeep,
     #[error("no log stream `{stream}` in log group `{group}`")]
     NoLogStream { group: String, stream: String },
+    #[error("AWS returned an invalid application authentication token")]
+    InvalidApplicationToken,
 }
 
 impl MicroVmClientError {
@@ -21,13 +30,41 @@ impl MicroVmClientError {
     where
         E: ProvideErrorMetadata + std::error::Error,
     {
-        let message = match (error.code(), error.message()) {
-            (Some(code), Some(message)) => format!("{code}: {message}"),
-            (Some(metadata), None) | (None, Some(metadata)) => metadata.to_owned(),
-            (None, None) => error
-                .as_service_error()
-                .map_or_else(|| error.to_string(), ToString::to_string),
-        };
-        Self::Service { operation, message }
+        Self::Service {
+            operation,
+            message: message(error),
+        }
+    }
+
+    pub(super) fn conflict<E, R>(operation: &'static str, error: &SdkError<E, R>) -> Self
+    where
+        E: ProvideErrorMetadata + std::error::Error,
+    {
+        Self::Conflict {
+            operation,
+            message: message(error),
+        }
+    }
+
+    pub(super) fn uncertain_launch<E, R>(error: &SdkError<E, R>) -> Self
+    where
+        E: ProvideErrorMetadata + std::error::Error,
+    {
+        Self::UncertainLaunch {
+            message: message(error),
+        }
+    }
+}
+
+fn message<E, R>(error: &SdkError<E, R>) -> String
+where
+    E: ProvideErrorMetadata + std::error::Error,
+{
+    match (error.code(), error.message()) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(metadata), None) | (None, Some(metadata)) => metadata.to_owned(),
+        (None, None) => error
+            .as_service_error()
+            .map_or_else(|| error.to_string(), ToString::to_string),
     }
 }

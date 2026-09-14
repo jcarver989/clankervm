@@ -29,6 +29,8 @@ A project file with all supported settings:
 [aws]
 region = "us-west-2"
 profile = "my-aws-profile"
+# Optional guard checked with STS before AWS-backed commands.
+expected-account-id = "123456789012"
 
 [microvm]
 name = "my-runner"
@@ -81,6 +83,17 @@ egress = "INTERNET_EGRESS"
 group = "/my-runner/microvms"
 since = "30m"
 limit = 1000
+
+[microvm.run.connect.api]
+port = 3000
+protocol = "http"
+path = "/api/info"
+timeout = "5m"
+client = ["curl", "--fail", "{url}", "-H", "{auth-header}", "-H", "{port-header}"]
+
+[microvm.run.connect.api.readiness]
+path = "/healthz"
+expected-status = 200
 ```
 
 Only `aws.region` and `microvm.name` are required to load a project. Image and
@@ -232,6 +245,36 @@ clankervm run \
   --egress INTERNET_EGRESS \
   -- ./job
 ```
+
+## Connect to applications
+
+Named connections route authenticated HTTPS or WebSocket requests through AWS to one
+configured VM port. The MicroVM must use `ALL_INGRESS`; public TLS remains on port 443
+and `X-aws-proxy-port` selects the guest port.
+
+```sh
+# Launch the configured remote command, wait for the API, then run its local client.
+clankervm run --connect api --ingress ALL_INGRESS -- /usr/local/bin/start-services
+
+# Attach to the same named application without launching or stopping anything.
+clankervm connect microvm-0099 api
+clankervm connect microvm-0099 api -- --client-option value
+
+clankervm inspect microvm-0099
+clankervm stop microvm-0099 --wait
+```
+
+A connection with no `client` performs authenticated readiness and prints a safe result.
+Configured clients inherit stdio and their exit status; disconnecting leaves the MicroVM
+running. `--connect-timeout` overrides the configured 1s–15m timeout. Client placeholders
+must occupy whole argv entries. Relative executables resolve from the project directory.
+
+Each invocation requests a fresh 30-minute credential scoped only to the selected port.
+ClankerVM redacts it from output and errors. A client using `{auth-header}` receives the
+credential in its process arguments, where local process inspection may expose it; use
+appropriate host protections. Required permissions include `lambda:RunMicrovm`,
+`lambda:GetMicrovm`, `lambda:TerminateMicrovm`, and `lambda:CreateMicrovmAuthToken`.
+When `aws.expected-account-id` is configured, `sts:GetCallerIdentity` is also required.
 
 ## Attach a shell
 
