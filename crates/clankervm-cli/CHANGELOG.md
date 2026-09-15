@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.3...clankervm-v0.1.4) - 2026-09-15
+
+### Added
+
+- Named connections ([#9](https://github.com/jcarver989/clankervm/pull/9))
+
 ## [0.1.3](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.2...clankervm-v0.1.3) - 2026-09-11
 
 ### Added
