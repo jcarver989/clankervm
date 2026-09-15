@@ -1,7 +1,8 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogEvent, LogPage, LogQuery, MicroVmClient,
-    MicroVmDetails, MicroVmSummary, Observation, Published, ShellToken,
+    AuthToken, AuthTokenExpiration, ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogEvent,
+    LogPage, LogQuery, MicroVmClient, MicroVmDetails, MicroVmSummary, Observation, Published,
+    ShellToken,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
@@ -16,6 +17,7 @@ use aws_sdk_lambdamicrovms::operation::get_microvm_image_version::GetMicrovmImag
 use aws_sdk_lambdamicrovms::operation::terminate_microvm::TerminateMicrovmError;
 use aws_sdk_lambdamicrovms::types::{
     CloudWatchLogging, CodeArtifact, Logging, MicrovmImageVersionState, MicrovmImageVersionStatus,
+    PortSpecification,
 };
 use aws_sdk_s3::primitives::ByteStream;
 use aws_smithy_types::DateTime;
@@ -80,7 +82,7 @@ impl AwsMicroVmClient {
         match result.await {
             Ok(output) => Ok(Some(output)),
             Err(error) if error.as_service_error().is_some_and(&is_missing) => Ok(None),
-            Err(error) => Err(MicroVmClientError::service(operation, &error)),
+            Err(error) => Err(MicroVmClientError::from_aws_error(operation, &error)),
         }
     }
 
@@ -319,7 +321,7 @@ impl MicroVmClient for AwsMicroVmClient {
         let output = builder
             .send()
             .await
-            .map_err(|error| MicroVmClientError::service("run MicroVM", &error))?;
+            .map_err(|error| MicroVmClientError::from_aws_error("run MicroVM", &error))?;
         Ok(Launch {
             microvm_id: output.microvm_id().into(),
             image_version: output.image_version,
@@ -411,6 +413,38 @@ impl MicroVmClient for AwsMicroVmClient {
             endpoint: output.endpoint,
             ingress_network_connectors: output.ingress_network_connectors.unwrap_or_default(),
         }))
+    }
+
+    async fn create_auth_token(
+        &self,
+        microvm_id: &str,
+        port: u16,
+        expiration: AuthTokenExpiration,
+    ) -> Result<AuthToken, MicroVmClientError> {
+        let output = self
+            .microvms
+            .create_microvm_auth_token()
+            .microvm_identifier(microvm_id)
+            .allowed_ports(PortSpecification::Port(i32::from(port)))
+            .expiration_in_minutes(expiration.minutes())
+            .send()
+            .await
+            .map_err(|error| {
+                MicroVmClientError::from_aws_error("create application auth token", &error)
+            })?;
+
+        let mut values = output
+            .auth_token
+            .into_iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("X-aws-proxy-auth"));
+
+        let (_, value) = values.next().ok_or(MicroVmClientError::ApplicationToken)?;
+
+        if values.next().is_some() {
+            return Err(MicroVmClientError::ApplicationToken);
+        }
+
+        AuthToken::new(value)
     }
 
     async fn shell_token(&self, microvm_id: &str) -> Result<ShellToken, MicroVmClientError> {

@@ -262,6 +262,50 @@ pub(crate) struct ShellToken {
     pub headers: HashMap<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AuthTokenExpiration(u8);
+
+impl AuthTokenExpiration {
+    /// AWS accepts expiration times between 1-60 minutes.
+    pub(crate) const fn from_minutes(minutes: u8) -> Option<Self> {
+        if minutes == 0 || minutes > 60 {
+            None
+        } else {
+            Some(Self(minutes))
+        }
+    }
+
+    pub(crate) const fn minutes(self) -> i32 {
+        self.0 as i32
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AuthToken(String);
+
+impl std::fmt::Debug for AuthToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApplicationToken([REDACTED])")
+    }
+}
+
+impl AuthToken {
+    pub(crate) fn new(value: String) -> Result<Self, MicroVmClientError> {
+        if value.is_empty()
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        {
+            return Err(MicroVmClientError::ApplicationToken);
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn value(&self) -> &str {
+        &self.0
+    }
+}
+
 /// An image name or ARN accepted by AWS `image_identifier`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ImageIdentifier {
@@ -340,9 +384,35 @@ pub(crate) trait MicroVmClient: Send + Sync {
         microvm_id: &str,
     ) -> Result<Option<MicroVmDetails>, MicroVmClientError>;
 
+    async fn create_auth_token(
+        &self,
+        microvm_id: &str,
+        port: u16,
+        expiration: AuthTokenExpiration,
+    ) -> Result<AuthToken, MicroVmClientError>;
+
     /// A token that authenticates a `/shell` handshake.
     async fn shell_token(&self, microvm_id: &str) -> Result<ShellToken, MicroVmClientError>;
 
     /// Stops one MicroVM; a MicroVM that is already gone is not an error.
     async fn terminate(&self, microvm_id: &str) -> Result<(), MicroVmClientError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AuthTokenExpiration;
+
+    #[test]
+    fn auth_token_expiration_accepts_only_aws_range() {
+        assert!(AuthTokenExpiration::from_minutes(0).is_none());
+        assert_eq!(
+            AuthTokenExpiration::from_minutes(1).map(AuthTokenExpiration::minutes),
+            Some(1)
+        );
+        assert_eq!(
+            AuthTokenExpiration::from_minutes(60).map(AuthTokenExpiration::minutes),
+            Some(60)
+        );
+        assert!(AuthTokenExpiration::from_minutes(61).is_none());
+    }
 }

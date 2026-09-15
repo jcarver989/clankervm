@@ -1,7 +1,7 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
-    ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogPage, LogQuery, MicroVmClient,
-    MicroVmDetails, MicroVmPage, Observation, Published, ShellToken,
+    AuthToken, AuthTokenExpiration, ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogPage,
+    LogQuery, MicroVmClient, MicroVmDetails, MicroVmPage, Observation, Published, ShellToken,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
@@ -25,6 +25,7 @@ pub(crate) enum Call {
     LogEvents(LogQuery),
     Describe(String),
     ShellToken(String),
+    AuthToken(String, u16, AuthTokenExpiration),
     Terminate(String),
 }
 
@@ -46,6 +47,7 @@ struct State {
     events: VecDeque<Result<LogPage, MicroVmClientError>>,
     described: VecDeque<Result<Option<MicroVmDetails>, MicroVmClientError>>,
     shell_tokens: VecDeque<Result<ShellToken, MicroVmClientError>>,
+    auth_tokens: VecDeque<Result<AuthToken, MicroVmClientError>>,
     terminated: VecDeque<Result<(), MicroVmClientError>>,
     delay: Option<Duration>,
     calls: Vec<Call>,
@@ -116,6 +118,14 @@ impl FakeMicroVmClient {
         self
     }
 
+    pub(crate) fn auth_tokens(
+        self,
+        responses: impl IntoIterator<Item = Result<AuthToken, MicroVmClientError>>,
+    ) -> Self {
+        self.lock().auth_tokens = responses.into_iter().collect();
+        self
+    }
+
     pub(crate) fn shell_tokens(
         self,
         responses: impl IntoIterator<Item = Result<ShellToken, MicroVmClientError>>,
@@ -166,6 +176,20 @@ impl FakeMicroVmClient {
 }
 
 impl MicroVmClient for FakeMicroVmClient {
+    async fn create_auth_token(
+        &self,
+        microvm_id: &str,
+        port: u16,
+        expiration: AuthTokenExpiration,
+    ) -> Result<AuthToken, MicroVmClientError> {
+        self.answer(
+            Call::AuthToken(microvm_id.into(), port, expiration),
+            |state| state.auth_tokens.pop_front(),
+            || AuthToken::new("fake-token".into()),
+        )
+        .await
+    }
+
     async fn publish(
         &self,
         spec: &ImageSpec,
