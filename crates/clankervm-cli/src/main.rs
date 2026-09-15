@@ -6,6 +6,7 @@ use std::process::ExitCode;
 async fn main() -> ExitCode {
     match Box::pin(execute(Cli::parse())).await {
         Ok(()) => ExitCode::SUCCESS,
+        Err(clankervm::ClankerError::ClientExit(code)) => ExitCode::from(code),
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::FAILURE

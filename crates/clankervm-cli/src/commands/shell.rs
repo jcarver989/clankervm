@@ -1,4 +1,5 @@
-use super::run::{RunOptions, plan_launch};
+use super::run::{LaunchOptions, plan_launch};
+use super::stop::terminate;
 use crate::client::{MicroVmClient, MicroVmDetails, SHELL_INGRESS};
 use crate::config::ProjectConfig;
 use crate::shell::{Event, Options, ShellError, attach, connect, events, is_interactive, request};
@@ -14,8 +15,6 @@ use tokio_tungstenite::tungstenite::client::ClientRequestBuilder;
 
 /// How often AWS is asked about a MicroVM that is still starting or stopping.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-/// How long AWS is given to confirm a termination it accepted.
-const TERMINATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// What a launched MicroVM runs when nothing else is asked of it: enough to
 /// keep it alive for the shell.
 const KEEP_ALIVE: [&str; 2] = ["sleep", "infinity"];
@@ -26,7 +25,7 @@ pub struct ShellOptions {
     ///
     /// Nothing is launched with an id, so the launch flags conflict with it:
     /// `RunSettings` is the group clap derives for the flattened settings, and
-    /// the rest are the arguments `RunOptions` adds on top of them.
+    /// the rest are the arguments `LaunchOptions` adds on top of them.
     #[arg(
         value_name = "MICROVM_ID",
         conflicts_with_all = ["RunSettings", "arguments", "release", "client_token"]
@@ -39,7 +38,7 @@ pub struct ShellOptions {
     #[arg(long, conflicts_with = "microvm_id")]
     pub keep: bool,
     #[command(flatten)]
-    pub run: RunOptions,
+    pub run: LaunchOptions,
 }
 
 /// What one `shell` invocation did.
@@ -203,20 +202,6 @@ async fn ready<T: MicroVmClient>(
     })
 }
 
-/// Stops the MicroVM and waits for AWS to confirm it.
-async fn terminate<T: MicroVmClient>(client: &T, microvm_id: &str) -> Result<(), ClankerError> {
-    client.terminate(microvm_id).await?;
-    let confirmed = poll(client, microvm_id, TERMINATE_TIMEOUT, |described| {
-        Ok(match described {
-            None => Some(()),
-            Some(details) if details.state == MicrovmState::Terminated => Some(()),
-            Some(_) => None,
-        })
-    })
-    .await?;
-    confirmed.ok_or_else(|| ClankerError::MicroVmTerminationUnconfirmed(microvm_id.to_owned()))
-}
-
 /// Describes the MicroVM every poll interval until `check` finds what it is
 /// waiting for, or `None` once `timeout` has passed.
 async fn poll<T, U>(
@@ -230,7 +215,7 @@ where
 {
     timeout(duration, async {
         loop {
-            if let Some(found) = check(client.describe(microvm_id).await?)? {
+            if let Some(found) = check(client.get_details(microvm_id).await?)? {
                 return Ok(Some(found));
             }
             sleep(POLL_INTERVAL).await;
@@ -317,7 +302,7 @@ mod tests {
             microvm_id: microvm_id.map(str::to_owned),
             timeout: Duration::from_mins(5),
             keep: false,
-            run: RunOptions::default(),
+            run: LaunchOptions::default(),
         }
     }
 
@@ -509,6 +494,7 @@ mod tests {
                         .build(),
                 )),
                 Ok(Some(MicroVmDetailsBuilder::new(LAUNCHED).build())),
+                Ok(Some(MicroVmDetailsBuilder::new(LAUNCHED).build())),
                 Ok(Some(
                     MicroVmDetailsBuilder::new(LAUNCHED)
                         .state(MicrovmState::Terminating)
@@ -622,7 +608,7 @@ mod tests {
         ));
         let client = FakeMicroVmClient::default()
             .launched([Ok(launch())])
-            .described(std::iter::once(running).chain(std::iter::repeat_n(stopping, 30)));
+            .described(std::iter::repeat_n(running, 2).chain(std::iter::repeat_n(stopping, 30)));
         let (socket, _remote) = session().await;
 
         let error = run(&options(None), &config, &client, socket)
@@ -639,7 +625,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_microvm_that_never_starts_times_out_and_is_stopped() {
         let (_directory, config) = config();
-        let client = FakeMicroVmClient::default().launched([Ok(launch())]);
+        let pending = Ok(Some(
+            MicroVmDetailsBuilder::new(LAUNCHED)
+                .state(MicrovmState::Pending)
+                .build(),
+        ));
+        let client = FakeMicroVmClient::default()
+            .launched([Ok(launch())])
+            .described(std::iter::repeat_n(pending, 4));
         let mut options = options(None);
         options.timeout = Duration::from_secs(5);
         let (socket, _remote) = session().await;

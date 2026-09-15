@@ -23,6 +23,8 @@ aws-config = { workspace = true }
 aws-sdk-cloudwatchlogs = { workspace = true }
 aws-sdk-lambdamicrovms = { workspace = true }
 aws-sdk-s3 = { workspace = true }
+aws-sdk-sts = { workspace = true }
+url = { workspace = true }
 aws-smithy-types = { workspace = true }
 base16ct = { workspace = true }
 clap = { workspace = true }
@@ -33,7 +35,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time", "process"] }
 tokio-tungstenite = { workspace = true }
 toml = { workspace = true }
 humantime = { workspace = true }

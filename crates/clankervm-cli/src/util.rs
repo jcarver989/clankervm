@@ -2,11 +2,20 @@ use crate::ClankerError;
 use base16ct::lower::encode_string;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub(crate) fn parse_release(value: &str) -> Result<(&str, &str), ClankerError> {
     value.rsplit_once('@').ok_or_else(|| {
         ClankerError::InvalidConfig(format!("invalid release `{value}`; expected NAME@VERSION"))
     })
+}
+
+pub(crate) fn positive_duration(value: &str) -> Result<Duration, String> {
+    let duration = humantime::parse_duration(value).map_err(|error| error.to_string())?;
+    if duration.is_zero() {
+        return Err("must be greater than zero".into());
+    }
+    Ok(duration)
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {

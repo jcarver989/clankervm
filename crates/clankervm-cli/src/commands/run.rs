@@ -1,3 +1,5 @@
+use super::connect;
+use crate::application::{SelectedConnection, select};
 use crate::arn::Arn;
 use crate::client::{LaunchSpec, MicroVmClient};
 use crate::config::{ProjectConfig, Settings};
@@ -8,13 +10,14 @@ use crate::{ClankerError, OutputFormat};
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 const DEFAULT_INGRESS: &str = "NO_INGRESS";
 const DEFAULT_RUN_EGRESS: &str = "INTERNET_EGRESS";
 const DEFAULT_MAX_DURATION: i32 = 3600;
 
 #[derive(Clone, Debug, Default, Args)]
-pub struct RunOptions {
+pub struct LaunchOptions {
     #[arg(last = true, allow_hyphen_values = true)]
     pub arguments: Vec<String>,
     #[arg(long)]
@@ -23,6 +26,31 @@ pub struct RunOptions {
     pub client_token: Option<String>,
     #[command(flatten)]
     pub settings: RunSettings,
+}
+
+#[derive(Debug, Default, Args)]
+pub struct RunOptions {
+    #[command(flatten)]
+    pub launch: LaunchOptions,
+    /// Connect to a named application after launching.
+    #[arg(long, conflicts_with = "client_token")]
+    pub connect: Option<String>,
+    /// Retry window; does not limit the lifetime of a running client.
+    #[arg(long, requires = "connect", value_parser = humantime::parse_duration)]
+    pub connect_timeout: Option<Duration>,
+}
+
+impl RunOptions {
+    pub(super) fn connection(
+        &self,
+        config: &ProjectConfig,
+        format: OutputFormat,
+    ) -> Result<Option<SelectedConnection>, ClankerError> {
+        self.connect
+            .as_deref()
+            .map(|name| select(config, name, self.connect_timeout, format))
+            .transpose()
+    }
 }
 
 /// Run settings resolved from the project file and CLI flags.
@@ -107,13 +135,18 @@ impl RunSettings {
     }
 }
 
-pub(super) async fn execute<T: MicroVmClient>(
-    options: &RunOptions,
+pub async fn run<T: MicroVmClient>(
+    options: RunOptions,
     config: &ProjectConfig,
     format: OutputFormat,
     client: &T,
 ) -> Result<(), ClankerError> {
-    let result = run(options, config, client).await?;
+    let selected = options.connection(config, format)?;
+    let result = launch_vm(&options.launch, config, client).await?;
+    if let Some(selected) = selected {
+        eprintln!("Started MicroVM {}", result.microvm_id);
+        return connect::connect_to_vm(client, &selected, &result.microvm_id, true, &[]).await;
+    }
     render(format, &result, || {
         format!(
             "✓ Started MicroVM {}\n  Release: {}@{}{}",
@@ -145,8 +178,8 @@ pub struct RunResult {
     image_name: String,
 }
 
-pub async fn run<T: MicroVmClient>(
-    cli: &RunOptions,
+pub(crate) async fn launch_vm<T: MicroVmClient>(
+    cli: &LaunchOptions,
     config: &ProjectConfig,
     client: &T,
 ) -> Result<RunResult, ClankerError> {
@@ -161,7 +194,7 @@ pub async fn run<T: MicroVmClient>(
 }
 
 pub(crate) fn plan_launch(
-    cli: &RunOptions,
+    cli: &LaunchOptions,
     config: &ProjectConfig,
 ) -> Result<LaunchPlan, ClankerError> {
     let settings = config.run.merge(&cli.settings)?;
@@ -191,7 +224,7 @@ pub(crate) fn plan_launch(
 mod tests {
     use super::*;
     use crate::client::{Call, FakeMicroVmClient, Launch};
-    use crate::test_support::{ROLE, project};
+    use crate::test_support::{MicroVmDetailsBuilder, ROLE, project};
     use tempfile::TempDir;
 
     /// A real project file, so the `[microvm.run]` schema and precedence are covered too.
@@ -269,12 +302,12 @@ mod tests {
             microvm_id: "microvm-7".into(),
             image_version: "3".into(),
         })]);
-        let cli = RunOptions {
+        let cli = LaunchOptions {
             arguments: vec!["echo".into(), "hello world".into()],
-            ..RunOptions::default()
+            ..LaunchOptions::default()
         };
 
-        let result = run(&cli, &config, &client).await.unwrap();
+        let result = launch_vm(&cli, &config, &client).await.unwrap();
 
         assert_eq!(result.microvm_id, "microvm-7");
         assert_eq!(result.image_version, "3");
@@ -310,7 +343,9 @@ mod tests {
         ));
         let client = FakeMicroVmClient::default();
 
-        run(&RunOptions::default(), &config, &client).await.unwrap();
+        launch_vm(&LaunchOptions::default(), &config, &client)
+            .await
+            .unwrap();
 
         let spec = launched(&client.calls());
         let payload: serde_json::Value = serde_json::from_str(&spec.run_hook_payload).unwrap();
@@ -323,7 +358,7 @@ mod tests {
     async fn flags_override_defaults_and_pin_the_release() {
         let (_directory, config) = config(&format!("{ROLE}command = [\"configured-command\"]\n"));
         let client = FakeMicroVmClient::default();
-        let cli = RunOptions {
+        let cli = LaunchOptions {
             arguments: vec!["echo".into()],
             release: Some("demo@7".into()),
             client_token: Some("run-42".into()),
@@ -334,7 +369,7 @@ mod tests {
             },
         };
 
-        run(&cli, &config, &client).await.unwrap();
+        launch_vm(&cli, &config, &client).await.unwrap();
 
         let spec = launched(&client.calls());
         assert_eq!(spec.image_version.as_deref(), Some("7"));
@@ -354,7 +389,7 @@ mod tests {
         let (_directory, config) = config(ROLE);
         let client = FakeMicroVmClient::default();
 
-        let error = run(&RunOptions::default(), &config, &client)
+        let error = launch_vm(&LaunchOptions::default(), &config, &client)
             .await
             .unwrap_err();
 
@@ -369,14 +404,71 @@ mod tests {
     async fn missing_execution_role_is_rejected() {
         let (_directory, config) = config("");
         let client = FakeMicroVmClient::default();
-        let cli = RunOptions {
+        let cli = LaunchOptions {
             arguments: vec!["echo".into()],
-            ..RunOptions::default()
+            ..LaunchOptions::default()
         };
 
-        let error = run(&cli, &config, &client).await.unwrap_err();
+        let error = launch_vm(&cli, &config, &client).await.unwrap_err();
 
         assert!(matches!(error, ClankerError::InvalidConfig(_)), "{error}");
         assert!(client.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_runs_without_a_connection() {
+        let (_directory, config) = config(&format!("{ROLE}command=['echo', 'hello']"));
+        let options = RunOptions::default();
+        assert!(
+            options
+                .connection(&config, OutputFormat::Human)
+                .unwrap()
+                .is_none()
+        );
+        let client = FakeMicroVmClient::default();
+
+        run(options, &config, OutputFormat::Human, &client)
+            .await
+            .unwrap();
+
+        assert!(matches!(client.calls().as_slice(), [Call::Launch(_)]));
+    }
+
+    #[tokio::test]
+    async fn connected_launch_runs_the_selected_client() {
+        let (_directory, config) = config(&format!(
+            "{ROLE}command=['/remote-not-installed']\n[microvm.run.network]\ningress='ALL_INGRESS'\n[microvm.run.connect.web]\nport=3000\nprotocol='http'\nclient=['true']"
+        ));
+        let options = RunOptions {
+            connect: Some("web".into()),
+            ..RunOptions::default()
+        };
+        let client = FakeMicroVmClient::default()
+            .launched([Ok(Launch {
+                microvm_id: "vm".into(),
+                image_version: "1".into(),
+            })])
+            .described([Ok(Some(
+                MicroVmDetailsBuilder::new("vm").application().build(),
+            ))]);
+
+        let payload: serde_json::Value = serde_json::from_str(
+            &plan_launch(&options.launch, &config)
+                .unwrap()
+                .spec
+                .run_hook_payload,
+        )
+        .unwrap();
+        run(options, &config, OutputFormat::Human, &client)
+            .await
+            .unwrap();
+
+        assert_eq!(payload["command"], "/remote-not-installed");
+        assert!(payload.get("connect").is_none());
+        assert!(matches!(client.calls().as_slice(), [
+            Call::Launch(_),
+            Call::Describe(id),
+            Call::AuthToken(token_id, 3000, _),
+        ] if id == "vm" && token_id == "vm"));
     }
 }

@@ -5,6 +5,7 @@ mod fake_microvm_client;
 mod microvm_client;
 
 pub(crate) use aws_microvm_client::AwsMicroVmClient;
+pub(crate) use error::AwsFailure;
 pub use error::MicroVmClientError;
 #[cfg(test)]
 pub(crate) use fake_microvm_client::{Call, FakeMicroVmClient};
