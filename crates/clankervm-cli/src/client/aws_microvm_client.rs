@@ -9,6 +9,7 @@ use crate::artifact::Artifact;
 use aws_config::SdkConfig;
 use aws_sdk_cloudwatchlogs::types::OutputLogEvent;
 use aws_sdk_lambdamicrovms::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_lambdamicrovms::operation::delete_microvm_image_version::DeleteMicrovmImageVersionError;
 use aws_sdk_lambdamicrovms::operation::get_microvm::GetMicrovmError;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image::GetMicrovmImageError;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image::GetMicrovmImageOutput;
@@ -23,6 +24,8 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_smithy_types::DateTime;
 use std::collections::HashMap;
 use std::future::Future;
+use std::time::Duration;
+use tokio::time::sleep;
 
 /// MicroVMs requested per listing page.
 const LIST_PAGE_SIZE: i32 = 50;
@@ -34,6 +37,10 @@ const STREAMS_PAGE_SIZE: i32 = 50;
 const EVENTS_PAGE_SIZE: usize = 10_000;
 /// Image versions requested per page while pruning.
 const VERSIONS_PAGE_SIZE: i32 = 50;
+/// Retries after AWS briefly rejects pruning while the image is updating.
+const DELETE_VERSION_RETRIES: usize = 5;
+/// Time between retries of a version deletion blocked by an image update.
+const DELETE_VERSION_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(crate) struct AwsMicroVmClient {
@@ -142,6 +149,33 @@ impl AwsMicroVmClient {
             .await
             .map_err(|error| MicroVmClientError::service("create image", &error))?
             .image_version)
+    }
+
+    async fn delete_image_version(
+        &self,
+        image: &Arn,
+        version: &str,
+    ) -> Result<(), MicroVmClientError> {
+        let mut retries = 0;
+        loop {
+            let result = self
+                .microvms
+                .delete_microvm_image_version()
+                .image_identifier(image.as_str())
+                .image_version(version)
+                .send()
+                .await;
+            match result {
+                Ok(_) => return Ok(()),
+                Err(error) if retries < DELETE_VERSION_RETRIES && is_updating_conflict(&error) => {
+                    retries += 1;
+                    sleep(DELETE_VERSION_RETRY_INTERVAL).await;
+                }
+                Err(error) => {
+                    return Err(MicroVmClientError::service("delete image version", &error));
+                }
+            }
+        }
     }
 
     async fn update_image(
@@ -253,13 +287,8 @@ impl MicroVmClient for AwsMicroVmClient {
             if *version.status() == MicrovmImageVersionStatus::Active {
                 continue;
             }
-            self.microvms
-                .delete_microvm_image_version()
-                .image_identifier(image.as_str())
-                .image_version(version.image_version())
-                .send()
-                .await
-                .map_err(|error| MicroVmClientError::service("delete image version", &error))?;
+            self.delete_image_version(image, version.image_version())
+                .await?;
         }
         Ok(())
     }
@@ -479,6 +508,15 @@ impl MicroVmClient for AwsMicroVmClient {
         .await
         .map(|_| ())
     }
+}
+
+fn is_updating_conflict<R>(error: &SdkError<DeleteMicrovmImageVersionError, R>) -> bool {
+    error.as_service_error().is_some_and(|error| {
+        error.is_conflict_exception()
+            && error
+                .message()
+                .is_some_and(|message| message.to_ascii_lowercase().contains("updating"))
+    })
 }
 
 fn tags(spec: &ImageSpec) -> HashMap<String, String> {

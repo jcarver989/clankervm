@@ -927,6 +927,43 @@ fn push_prunes_every_page_of_old_versions() {
 }
 
 #[test]
+fn push_retries_pruning_while_the_image_is_updating() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), PRUNING_CONFIG);
+    let fake = FakeAws::start(vec![
+        Response::ok("{}"),
+        Response::not_found(),
+        Response::ok(IMAGE_CREATING),
+        Response::ok(IMAGE_CREATED),
+        Response::ok(VERSION_ACTIVE),
+        Response::ok(VERSIONS_PAGE_ACTIVE),
+        Response::ok(VERSIONS_PAGE_DELETED),
+        Response::image_updating(),
+        Response::ok("{}"),
+    ]);
+
+    let result = run_json(
+        directory.path(),
+        &["--format", "json", "push", "--timeout", "5s"],
+        &fake.url(),
+    );
+
+    assert_eq!(result["release"], "demo@2");
+    let requests = fake.finish();
+    let deleted: Vec<&String> = requests
+        .iter()
+        .filter(|request| request.starts_with("DELETE "))
+        .collect();
+    assert_eq!(deleted.len(), 2, "{requests:#?}");
+    assert!(
+        deleted
+            .iter()
+            .all(|request| request.contains("/versions/1")),
+        "{deleted:#?}"
+    );
+}
+
+#[test]
 fn service_failures_report_the_code_and_message_aws_returns() {
     let directory = TempDir::new().unwrap();
     write_config(directory.path(), "");
