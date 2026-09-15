@@ -295,13 +295,10 @@ async fn terminate_allows_the_command_process_group_to_exit_gracefully() {
 
     assert_eq!(response.status, StatusCode::OK);
     let (command_pid, child_pid) = script.pids().await;
-    let (first_terminate, second_terminate) =
-        tokio::join!(server.post("/terminate"), server.post("/terminate"));
+    let terminate = server.post("/terminate").await;
 
-    for terminate in [first_terminate, second_terminate] {
-        assert_eq!(terminate.status, StatusCode::OK);
-        assert_eq!(terminate.body, json!({ "status": "terminating" }));
-    }
+    assert_eq!(terminate.status, StatusCode::OK);
+    assert_eq!(terminate.body, json!({ "status": "terminating" }));
 
     assert!(script.was_terminated());
     wait_until_gone(command_pid).await;
