@@ -26,6 +26,14 @@ impl Response {
         }
     }
 
+    /// A transient conflict while an image update is still settling.
+    pub fn image_updating() -> Self {
+        Self {
+            status: 409,
+            body: r#"{"__type":"ConflictException","message":"The image is currently Updating"}"#,
+        }
+    }
+
     /// A refusal that carries the error code and message AWS reports.
     pub fn access_denied() -> Self {
         Self {
