@@ -1,6 +1,4 @@
 use super::*;
-use crate::test_support::project;
-use tempfile::TempDir;
 
 #[test]
 fn endpoint_parsing_and_paths() {
