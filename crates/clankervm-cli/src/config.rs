@@ -1,4 +1,5 @@
 use crate::ClankerError;
+use crate::application::validate_path;
 use crate::arn::Arn;
 use crate::client::{ImageConfiguration, ImageSpec};
 use crate::commands::{LogsSettings, PushSettings, RunSettings, StatusSettings};
@@ -8,8 +9,9 @@ use aws_sdk_lambdamicrovms::types::{HookState, Hooks, MicrovmHooks, MicrovmImage
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,16 +25,18 @@ pub struct ProjectConfig {
     pub status: StatusSettings,
     pub run: RunSettings,
     pub logs: LogsSettings,
+    pub connections: BTreeMap<String, ConnectionSettings>,
     root: PathBuf,
     ready: Option<ImageHookConfig>,
     validate: Option<ImageHookConfig>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct AwsConfig {
     pub region: String,
     pub profile: Option<String>,
+    pub expected_account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +141,7 @@ struct RunConfig {
     max_duration: Option<i32>,
     network: RunNetworkConfig,
     logs: LogsSettings,
+    connect: BTreeMap<String, ConnectionSettings>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -146,12 +151,55 @@ struct RunNetworkConfig {
     egress: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Http,
+    Websocket,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ConnectionSettings {
+    pub port: NonZeroU16,
+    pub protocol: Protocol,
+    #[serde(default = "connection_path")]
+    pub path: String,
+    #[serde(default = "connection_timeout", with = "humantime_serde")]
+    pub timeout: Duration,
+    pub client: Vec<String>,
+}
+
+fn connection_path() -> String {
+    "/".into()
+}
+fn connection_timeout() -> Duration {
+    Duration::from_secs(300)
+}
+
+impl ConnectionSettings {
+    pub(crate) fn validate(&self) -> Result<(), ClankerError> {
+        validate_path(&self.path)?;
+        if self.client.first().is_none_or(|executable| {
+            executable.trim().is_empty() || executable.contains('{') || executable.contains('}')
+        }) {
+            return Err(ClankerError::InvalidConfig(
+                "connection client requires a nonempty executable without placeholders".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl TryFrom<ProjectFile> for ProjectConfig {
     type Error = ClankerError;
 
     fn try_from(file: ProjectFile) -> Result<Self, Self::Error> {
         let image = file.microvm.image;
         let run = file.microvm.run;
+        for connection in run.connect.values() {
+            connection.validate()?;
+        }
         if let Some(ready) = &image.hooks.ready {
             ready.payload(&file.aws.region, "ready")?;
         }
@@ -198,6 +246,7 @@ impl TryFrom<ProjectFile> for ProjectConfig {
                 log_group: run.logs.log_group.clone(),
             },
             logs: run.logs,
+            connections: run.connect,
             root: PathBuf::new(),
             ready: image.hooks.ready,
             validate: image.hooks.validate,

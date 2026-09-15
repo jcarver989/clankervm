@@ -1,3 +1,4 @@
+mod application;
 mod arn;
 mod artifact;
 mod client;
@@ -23,6 +24,7 @@ pub use shell::ShellError;
 #[derive(Debug, Parser)]
 #[command(
     name = "clankervm",
+    version,
     about = "Bundle, push, and run AWS Lambda MicroVM apps"
 )]
 pub struct Cli {
@@ -44,6 +46,12 @@ pub enum OutputFormat {
 
 #[derive(Debug, Error)]
 pub enum ClankerError {
+    #[error("{0}")]
+    Application(String),
+    #[error("application operation timed out")]
+    ApplicationOperationTimeout,
+    #[error("local client exited with status {0}")]
+    ClientExit(u8),
     #[error(
         "failed to read project config {path}: {source}\n\nCreate one with: clankervm init --name <app>"
     )]

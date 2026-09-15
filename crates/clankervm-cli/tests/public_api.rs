@@ -45,7 +45,9 @@ fn help_exposes_release_workflow() {
     let output = run_cli(Path::new("."), &["--help"], "");
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    for command in ["init", "push", "status", "list", "run", "logs", "shell"] {
+    for command in [
+        "init", "push", "status", "list", "run", "logs", "shell", "connect", "describe", "stop",
+    ] {
         assert!(text.contains(command), "missing {command} in {text}");
     }
     for removed in ["  bundle", "  wait"] {
@@ -144,6 +146,50 @@ fn shell_rejects_json_before_project_or_credential_setup() {
 }
 
 #[test]
+fn named_connections_separate_remote_and_local_arguments() {
+    let ClankerCommand::Run(options) = parse(&[
+        "run",
+        "--connect",
+        "aether",
+        "--connect-timeout",
+        "1m",
+        "--",
+        "/remote-only",
+        "--agent",
+        "Simple Builder",
+    ]) else {
+        panic!("expected run");
+    };
+    assert_eq!(options.connect.as_deref(), Some("aether"));
+    assert_eq!(
+        options.launch.arguments,
+        ["/remote-only", "--agent", "Simple Builder"]
+    );
+    let ClankerCommand::Connect(options) = parse(&[
+        "connect",
+        "vm-1",
+        "aether",
+        "--",
+        "--session",
+        "a b",
+        "",
+        "x=y",
+    ]) else {
+        panic!("expected connect");
+    };
+    assert_eq!(options.arguments, ["--session", "a b", "", "x=y"]);
+    for args in [
+        vec!["run", "--connect-timeout", "1s"],
+        vec!["run", "--connect", "aether", "--client-token", "replay"],
+        vec!["connect", "vm-1"],
+        vec!["shell", "--connect", "aether"],
+        vec!["stop", "vm-1", "--timeout", "0s"],
+    ] {
+        assert!(Cli::try_parse_from(std::iter::once("clankervm").chain(args)).is_err());
+    }
+}
+
+#[test]
 fn run_requires_separator_before_the_command() {
     let ClankerCommand::Run(run) = parse(&[
         "run",
@@ -157,8 +203,8 @@ fn run_requires_separator_before_the_command() {
     ]) else {
         panic!("expected run command");
     };
-    assert_eq!(run.arguments, ["command", "--command-option"]);
-    assert_eq!(run.settings.environment.unwrap(), ["GREETING=hello"]);
+    assert_eq!(run.launch.arguments, ["command", "--command-option"]);
+    assert_eq!(run.launch.settings.environment.unwrap(), ["GREETING=hello"]);
 }
 
 #[test]

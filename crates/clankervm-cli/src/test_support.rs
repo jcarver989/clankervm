@@ -7,7 +7,8 @@ use aws_sdk_lambdamicrovms::types::{
 };
 use aws_smithy_types::DateTime;
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 /// A `[microvm.run]` entry naming the account role tests resolve the image from.
 pub(crate) const ROLE: &str = "iam-role = \"arn:aws:iam::123456789012:role/run\"\n";
@@ -126,6 +127,13 @@ impl MicroVmDetailsBuilder {
         }
     }
 
+    pub(crate) fn application(self) -> Self {
+        self.endpoint("https://test.lambda-microvm.us-east-1.on.aws")
+            .ingress_network_connectors([
+                "arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:ALL_INGRESS",
+            ])
+    }
+
     pub(crate) fn state(mut self, state: MicrovmState) -> Self {
         self.details.state = state;
         self
@@ -178,6 +186,14 @@ impl LogEventBuilder {
     pub(crate) fn build(self) -> LogEvent {
         self.event
     }
+}
+
+/// Creates a real local executable without printing credential-bearing argv.
+pub(crate) fn executable(directory: &Path, body: &str) -> PathBuf {
+    let path = directory.join("test-client");
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
 }
 
 /// Writes a real project file and loads it, so tests exercise the file schema
