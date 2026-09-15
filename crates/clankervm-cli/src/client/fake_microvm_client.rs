@@ -284,7 +284,7 @@ impl MicroVmClient for FakeMicroVmClient {
         .await
     }
 
-    async fn describe(
+    async fn get_details(
         &self,
         microvm_id: &str,
     ) -> Result<Option<MicroVmDetails>, MicroVmClientError> {

@@ -392,7 +392,7 @@ impl MicroVmClient for AwsMicroVmClient {
         })
     }
 
-    async fn describe(
+    async fn get_details(
         &self,
         microvm_id: &str,
     ) -> Result<Option<MicroVmDetails>, MicroVmClientError> {

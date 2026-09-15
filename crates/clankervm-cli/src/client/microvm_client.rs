@@ -243,9 +243,11 @@ where
 pub(crate) type MicroVmPage = (Vec<MicroVmSummary>, Option<String>);
 
 /// One MicroVM as `GetMicrovm` describes it, in the terms `shell` needs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct MicroVmDetails {
     pub microvm_id: String,
+    #[serde(serialize_with = "serialize_state")]
     pub state: MicrovmState,
     pub state_reason: Option<String>,
     /// The host the MicroVM's pty is reachable at.
@@ -379,7 +381,7 @@ pub(crate) trait MicroVmClient: Send + Sync {
     async fn log_events(&self, query: &LogQuery) -> Result<LogPage, MicroVmClientError>;
 
     /// The current description of one MicroVM, or `None` when it is gone.
-    async fn describe(
+    async fn get_details(
         &self,
         microvm_id: &str,
     ) -> Result<Option<MicroVmDetails>, MicroVmClientError>;
