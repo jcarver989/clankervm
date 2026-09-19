@@ -116,17 +116,27 @@ pub enum ClankerError {
     #[error("MicroVM `{0}` does not exist")]
     MicroVmNotFound(String),
     #[error(
-        "MicroVM `{microvm_id}` is {state}, not RUNNING{}",
+        "MicroVM `{microvm_id}` is {state}, not {expected}{}",
         reason.as_deref().map_or(String::new(), |reason| format!(" ({reason})"))
     )]
-    MicroVmNotRunning {
+    UnexpectedMicroVmState {
         microvm_id: String,
         state: String,
         reason: Option<String>,
+        expected: &'static str,
     },
     #[error("timed out after {timeout:?} waiting for MicroVM `{microvm_id}`")]
     MicroVmWaitTimeout {
         microvm_id: String,
+        timeout: Duration,
+    },
+    #[error(
+        "timed out after {timeout:?} waiting to {operation} MicroVM `{microvm_id}` (target state {target}); check it with `clankervm describe {microvm_id}` or retry with a larger --timeout"
+    )]
+    MicroVmLifecycleUnconfirmed {
+        microvm_id: String,
+        operation: &'static str,
+        target: &'static str,
         timeout: Duration,
     },
     #[error("MicroVM `{0}` was not confirmed terminated; check it with `clankervm list`")]

@@ -1,13 +1,13 @@
 mod connect;
 mod describe;
 mod init;
+mod lifecycle;
 mod list;
 mod logs;
 mod push;
 mod run;
 mod shell;
 mod status;
-mod stop;
 
 use crate::application::{failure, select};
 use crate::client::AwsMicroVmClient;
@@ -19,6 +19,7 @@ use clap::Subcommand;
 pub use connect::ConnectOptions;
 pub use describe::CommandOptions as DescribeOptions;
 use init::InitArgs;
+pub use lifecycle::LifecycleOptions;
 pub use list::ListOptions;
 pub use logs::LogsOptions;
 pub(crate) use logs::LogsSettings;
@@ -30,7 +31,6 @@ pub use shell::ShellOptions;
 pub use status::StatusOptions;
 pub(crate) use status::StatusSettings;
 use std::time::Duration;
-pub use stop::CommandOptions as StopOptions;
 use tokio::time::timeout;
 
 #[derive(Debug, Subcommand)]
@@ -49,8 +49,12 @@ pub enum Command {
     Connect(ConnectOptions),
     /// Describe a MicroVM without requesting an application token.
     Describe(DescribeOptions),
+    /// Suspend a MicroVM, optionally waiting for confirmation.
+    Suspend(LifecycleOptions),
+    /// Resume a MicroVM, optionally waiting for confirmation.
+    Resume(LifecycleOptions),
     /// Stop a MicroVM, optionally waiting for confirmation.
-    Stop(StopOptions),
+    Stop(LifecycleOptions),
     /// Read the logs of a MicroVM.
     Logs(LogsOptions),
     /// Attach a terminal to a MicroVM's pty, launching one if needed.
@@ -124,7 +128,9 @@ pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
         Command::Run(options) => run::run(options, &config, cli.format, &client).await,
         Command::Connect(options) => connect::connect(options, &config, cli.format, &client).await,
         Command::Describe(options) => describe::describe(options, cli.format, &client).await,
-        Command::Stop(options) => stop::stop(options, cli.format, &client).await,
+        Command::Suspend(options) => lifecycle::suspend(options, cli.format, &client).await,
+        Command::Resume(options) => lifecycle::resume(options, cli.format, &client).await,
+        Command::Stop(options) => lifecycle::stop(options, cli.format, &client).await,
         Command::Logs(options) => logs::execute(&options, &config, cli.format, &client).await,
         Command::Shell(options) => Box::pin(shell::execute(&options, &config, &client)).await,
         Command::Init(_) => unreachable!("init returns before project setup"),

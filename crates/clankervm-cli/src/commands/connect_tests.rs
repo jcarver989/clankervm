@@ -1,7 +1,8 @@
 use super::*;
 use crate::client::{AuthToken, Call, FakeMicroVmClient};
 use crate::config::ProjectConfig;
-use crate::test_support::{MicroVmDetailsBuilder, ROLE, executable, project};
+use crate::test_support::{MicroVmDetailsBuilder, ROLE, executable, microvm_details, project};
+use aws_sdk_lambdamicrovms::types::MicrovmState;
 use std::fs;
 use tempfile::TempDir;
 
@@ -118,7 +119,7 @@ async fn endpoint_wait_handles_delayed_registration_but_not_missing_existing_vms
         .await
         .unwrap();
 
-    assert_eq!(start.elapsed(), Duration::from_secs(3));
+    assert_eq!(start.elapsed(), Duration::from_secs(6));
     let client = FakeMicroVmClient::default();
     assert!(matches!(
         wait_for_endpoint(
@@ -131,6 +132,21 @@ async fn endpoint_wait_handles_delayed_registration_but_not_missing_existing_vms
         Err(ClankerError::MicroVmNotFound(_))
     ));
     assert_eq!(client.calls(), [Call::Describe("vm".into())]);
+
+    let client = FakeMicroVmClient::default().described([
+        Ok(Some(microvm_details("vm", MicrovmState::Pending))),
+        Ok(None),
+    ]);
+    assert!(matches!(
+        wait_for_endpoint(
+            &client,
+            "vm",
+            true,
+            Instant::now() + Duration::from_secs(10)
+        )
+        .await,
+        Err(ClankerError::MicroVmNotFound(_))
+    ));
 }
 
 struct ConnectionTest {

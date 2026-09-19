@@ -114,6 +114,14 @@ pub(crate) struct MicroVmDetailsBuilder {
     details: MicroVmDetails,
 }
 
+pub(crate) fn microvm_details(microvm_id: &str, state: MicrovmState) -> MicroVmDetails {
+    MicroVmDetailsBuilder::new(microvm_id).state(state).build()
+}
+
+pub(crate) fn resuming() -> MicrovmState {
+    crate::client::resuming_state()
+}
+
 impl MicroVmDetailsBuilder {
     pub(crate) fn new(microvm_id: &str) -> Self {
         Self {

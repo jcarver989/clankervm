@@ -4,6 +4,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// How often AWS is polled for asynchronous state changes.
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
 pub(crate) fn parse_release(value: &str) -> Result<(&str, &str), ClankerError> {
     value.rsplit_once('@').ok_or_else(|| {
         ClankerError::InvalidConfig(format!("invalid release `{value}`; expected NAME@VERSION"))
