@@ -496,6 +496,26 @@ impl MicroVmClient for AwsMicroVmClient {
         })
     }
 
+    async fn suspend(&self, microvm_id: &str) -> Result<(), MicroVmClientError> {
+        self.microvms
+            .suspend_microvm()
+            .microvm_identifier(microvm_id)
+            .send()
+            .await
+            .map_err(|error| MicroVmClientError::from_aws_error("suspend MicroVM", &error))?;
+        Ok(())
+    }
+
+    async fn resume(&self, microvm_id: &str) -> Result<(), MicroVmClientError> {
+        self.microvms
+            .resume_microvm()
+            .microvm_identifier(microvm_id)
+            .send()
+            .await
+            .map_err(|error| MicroVmClientError::from_aws_error("resume MicroVM", &error))?;
+        Ok(())
+    }
+
     async fn terminate(&self, microvm_id: &str) -> Result<(), MicroVmClientError> {
         self.optional(
             "terminate MicroVM",
