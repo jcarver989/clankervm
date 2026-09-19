@@ -8,6 +8,7 @@ use tempfile::TempDir;
 
 const RUNNING: &str = r#"{"microvmId":"vm-1","state":"RUNNING","endpoint":"https://test.lambda-microvm.us-east-1.on.aws","imageArn":"image","imageVersion":"1","executionRoleArn":"role","startedAt":1787616000,"maximumDurationInSeconds":3600,"ingressNetworkConnectors":["arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:ALL_INGRESS"]}"#;
 const TERMINATING: &str = r#"{"microvmId":"vm-1","state":"TERMINATING","endpoint":"","imageArn":"image","imageVersion":"1","executionRoleArn":"role","startedAt":1787616000,"maximumDurationInSeconds":3600}"#;
+const SUSPENDED: &str = r#"{"microvmId":"vm-1","state":"SUSPENDED","endpoint":"","imageArn":"image","imageVersion":"1","executionRoleArn":"role","startedAt":1787616000,"maximumDurationInSeconds":3600}"#;
 
 #[test]
 fn application_token_sdk_request_is_single_port_and_response_never_printed() {
@@ -55,6 +56,40 @@ fn client_retries_use_fresh_sdk_tokens_without_probing_or_printing_them() {
         requests[1].split("\r\n\r\n").nth(1),
         requests[2].split("\r\n\r\n").nth(1)
     );
+}
+
+#[test]
+fn suspend_and_resume_use_the_sdk_endpoints_and_stable_json() {
+    let project = Project::new().config("", "");
+    for (command, described, field, path) in [
+        (
+            "suspend",
+            RUNNING,
+            "suspensionConfirmed",
+            "/2025-09-09/microvms/vm-1/suspend",
+        ),
+        (
+            "resume",
+            SUSPENDED,
+            "resumptionConfirmed",
+            "/2025-09-09/microvms/vm-1/resume",
+        ),
+    ] {
+        let aws = FakeAws::start(vec![Response::ok(described), Response::ok("{}")]);
+        let output = project.run(&["--format", "json", command, "vm-1"], &aws.url());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["microvmId"], "vm-1");
+        assert_eq!(body[field], false);
+        let requests = aws.finish();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].starts_with("POST "), "{}", requests[1]);
+        assert!(requests[1].contains(path), "{}", requests[1]);
+    }
 }
 
 #[test]

@@ -2,6 +2,7 @@
 #[path = "connect_tests.rs"]
 mod tests;
 
+use super::lifecycle::wait_until_running;
 use crate::ClankerError;
 use crate::OutputFormat;
 use crate::application::{
@@ -9,7 +10,6 @@ use crate::application::{
 };
 use crate::client::{AuthTokenExpiration, MicroVmClient};
 use crate::config::ProjectConfig;
-use aws_sdk_lambdamicrovms::types::MicrovmState;
 use clap::Args;
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
@@ -113,38 +113,16 @@ async fn wait_for_endpoint<T: MicroVmClient>(
     launched: bool,
     deadline: Instant,
 ) -> Result<Url, ClankerError> {
-    timeout_at(deadline, async {
-        let mut observed = false;
-        loop {
-            let Some(details) = client.get_details(id).await? else {
-                if !launched || observed {
-                    return Err(ClankerError::MicroVmNotFound(id.into()));
-                }
-                sleep(Duration::from_secs(1)).await;
-                continue;
-            };
-
-            observed = true;
-
-            match details.state {
-                MicrovmState::Pending => {
-                    sleep(Duration::from_secs(1)).await;
-                }
-                MicrovmState::Running if details.endpoint.is_empty() => {
-                    sleep(Duration::from_secs(1)).await;
-                }
-
-                MicrovmState::Running => return endpoint(&details.endpoint),
-                state => {
-                    return Err(ClankerError::MicroVmNotRunning {
-                        microvm_id: id.into(),
-                        state: state.to_string(),
-                        reason: details.state_reason,
-                    });
-                }
+    timeout_at(
+        deadline,
+        wait_until_running(client, id, launched, |details| {
+            if details.endpoint.is_empty() {
+                Ok(None)
+            } else {
+                endpoint(&details.endpoint).map(Some)
             }
-        }
-    })
+        }),
+    )
     .await
     .map_err(|_| ClankerError::ApplicationOperationTimeout)?
 }

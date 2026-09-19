@@ -1,11 +1,10 @@
 use crate::ClankerError;
 use crate::arn::Arn;
 use crate::client::{MicroVmClient, Observation};
+use crate::util::POLL_INTERVAL;
 use serde::Serialize;
 use std::time::Duration;
 use tokio::time::{Instant, sleep, sleep_until};
-
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// One release: an image version pinned by name.
 #[derive(Clone, Debug)]

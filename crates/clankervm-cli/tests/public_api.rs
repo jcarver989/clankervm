@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::Duration;
 use support::{
     FakeAws, IMAGE_CREATED, IMAGE_CREATING, LOG_EVENTS, LOG_STREAMS, MICROVMS_NONE,
     MICROVMS_PAGE_RUNNING, MICROVMS_PAGE_TERMINATED, Response, VERSION_ACTIVE, VERSION_PENDING,
@@ -46,12 +47,35 @@ fn help_exposes_release_workflow() {
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
     for command in [
-        "init", "push", "status", "list", "run", "logs", "shell", "connect", "describe", "stop",
+        "init", "push", "status", "list", "run", "logs", "shell", "connect", "describe", "suspend",
+        "resume", "stop",
     ] {
         assert!(text.contains(command), "missing {command} in {text}");
     }
     for removed in ["  bundle", "  wait"] {
         assert!(!text.contains(removed), "unexpected {removed} in {text}");
+    }
+}
+
+#[test]
+fn lifecycle_commands_parse_wait_and_positive_timeouts() {
+    let ClankerCommand::Suspend(suspend) = parse(&["suspend", "vm-1"]) else {
+        panic!("expected suspend command");
+    };
+    assert_eq!(suspend.vm_id, "vm-1");
+    assert!(!suspend.wait);
+    assert_eq!(suspend.timeout, Duration::from_secs(30));
+
+    let ClankerCommand::Resume(resume) = parse(&["resume", "vm-1", "--wait", "--timeout", "2m"])
+    else {
+        panic!("expected resume command");
+    };
+    assert_eq!(resume.vm_id, "vm-1");
+    assert!(resume.wait);
+    assert_eq!(resume.timeout, Duration::from_secs(120));
+
+    for command in ["suspend", "resume"] {
+        assert!(Cli::try_parse_from(["clankervm", command, "vm-1", "--timeout", "0s"]).is_err());
     }
 }
 
@@ -882,6 +906,8 @@ fn run_uses_project_defaults_and_forwards_client_token() {
             "missing {expected} in {request}"
         );
     }
+    let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert!(body.get("idlePolicy").is_none(), "{body}");
 }
 
 #[test]

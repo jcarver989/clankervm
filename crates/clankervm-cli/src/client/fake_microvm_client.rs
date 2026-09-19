@@ -26,6 +26,8 @@ pub(crate) enum Call {
     Describe(String),
     ShellToken(String),
     AuthToken(String, u16, AuthTokenExpiration),
+    Suspend(String),
+    Resume(String),
     Terminate(String),
 }
 
@@ -48,6 +50,8 @@ struct State {
     described: VecDeque<Result<Option<MicroVmDetails>, MicroVmClientError>>,
     shell_tokens: VecDeque<Result<ShellToken, MicroVmClientError>>,
     auth_tokens: VecDeque<Result<AuthToken, MicroVmClientError>>,
+    suspended: VecDeque<Result<(), MicroVmClientError>>,
+    resumed: VecDeque<Result<(), MicroVmClientError>>,
     terminated: VecDeque<Result<(), MicroVmClientError>>,
     delay: Option<Duration>,
     calls: Vec<Call>,
@@ -131,6 +135,22 @@ impl FakeMicroVmClient {
         responses: impl IntoIterator<Item = Result<ShellToken, MicroVmClientError>>,
     ) -> Self {
         self.lock().shell_tokens = responses.into_iter().collect();
+        self
+    }
+
+    pub(crate) fn suspended(
+        self,
+        responses: impl IntoIterator<Item = Result<(), MicroVmClientError>>,
+    ) -> Self {
+        self.lock().suspended = responses.into_iter().collect();
+        self
+    }
+
+    pub(crate) fn resumed(
+        self,
+        responses: impl IntoIterator<Item = Result<(), MicroVmClientError>>,
+    ) -> Self {
+        self.lock().resumed = responses.into_iter().collect();
         self
     }
 
@@ -307,6 +327,24 @@ impl MicroVmClient for FakeMicroVmClient {
                         .collect(),
                 })
             },
+        )
+        .await
+    }
+
+    async fn suspend(&self, microvm_id: &str) -> Result<(), MicroVmClientError> {
+        self.answer(
+            Call::Suspend(microvm_id.to_owned()),
+            |state| state.suspended.pop_front(),
+            || Ok(()),
+        )
+        .await
+    }
+
+    async fn resume(&self, microvm_id: &str) -> Result<(), MicroVmClientError> {
+        self.answer(
+            Call::Resume(microvm_id.to_owned()),
+            |state| state.resumed.pop_front(),
+            || Ok(()),
         )
         .await
     }

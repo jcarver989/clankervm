@@ -211,6 +211,16 @@ clankervm --format json list --all
 Available states: `PENDING`, `RUNNING`, `SUSPENDED`, `SUSPENDING`,
 `TERMINATING`, and `TERMINATED`.
 
+## Suspend and resume a MicroVM
+
+Suspend a MicroVM and resume it later:
+
+```sh
+clankervm suspend microvm-0099
+clankervm suspend microvm-0099 --wait --timeout 1m
+clankervm resume microvm-0099
+clankervm resume microvm-0099 --wait --timeout 1m
+```
 ## Run a command
 
 ```sh

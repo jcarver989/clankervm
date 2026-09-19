@@ -396,6 +396,12 @@ pub(crate) trait MicroVmClient: Send + Sync {
     /// A token that authenticates a `/shell` handshake.
     async fn shell_token(&self, microvm_id: &str) -> Result<ShellToken, MicroVmClientError>;
 
+    /// Suspends one running MicroVM.
+    async fn suspend(&self, microvm_id: &str) -> Result<(), MicroVmClientError>;
+
+    /// Resumes one suspended MicroVM.
+    async fn resume(&self, microvm_id: &str) -> Result<(), MicroVmClientError>;
+
     /// Stops one MicroVM; a MicroVM that is already gone is not an error.
     async fn terminate(&self, microvm_id: &str) -> Result<(), MicroVmClientError>;
 }
