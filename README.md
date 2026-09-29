@@ -91,6 +91,7 @@ clankervm --config PATH COMMAND
 clankervm --region REGION COMMAND
 clankervm --format human COMMAND
 clankervm --format json COMMAND
+clankervm --image-busy-timeout 10m COMMAND
 ```
 
 Run `clankervm --help` or `clankervm COMMAND --help` for all options.
