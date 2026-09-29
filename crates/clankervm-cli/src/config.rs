@@ -26,6 +26,7 @@ pub struct ProjectConfig {
     pub run: RunSettings,
     pub logs: LogsSettings,
     pub connections: BTreeMap<String, ConnectionSettings>,
+    pub image_busy_timeout: Option<Duration>,
     root: PathBuf,
     ready: Option<ImageHookConfig>,
     validate: Option<ImageHookConfig>,
@@ -60,6 +61,8 @@ struct MicrovmConfig {
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 struct ImageConfig {
     base_image: Option<String>,
+    #[serde(with = "humantime_serde")]
+    busy_timeout: Option<Duration>,
     minimum_memory_mib: Option<i32>,
     os_capabilities: Option<Vec<String>>,
     iam_role: Option<String>,
@@ -130,6 +133,7 @@ struct VersionsConfig {
     max: Option<usize>,
     #[serde(with = "humantime_serde")]
     wait_timeout: Option<Duration>,
+    build_retries: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -219,6 +223,7 @@ impl TryFrom<ProjectFile> for ProjectConfig {
                 capabilities: image.os_capabilities,
                 egress: image.network.egress,
                 keep_versions: image.versions.max,
+                build_retries: image.versions.build_retries,
                 tags: image.tags,
                 port: image.hooks.port,
                 ready_timeout_seconds: hook_seconds(image.hooks.ready_timeout, "ready-timeout")?,
@@ -247,6 +252,7 @@ impl TryFrom<ProjectFile> for ProjectConfig {
             },
             logs: run.logs,
             connections: run.connect,
+            image_busy_timeout: image.busy_timeout,
             root: PathBuf::new(),
             ready: image.hooks.ready,
             validate: image.hooks.validate,
@@ -713,6 +719,8 @@ iam-role = "arn:aws:iam::123456789012:role/run"
         assert_eq!(push.run_timeout_seconds, Some(60));
         assert_eq!(push.terminate_timeout_seconds, Some(30));
         assert_eq!(push.keep_versions, Some(10));
+        assert_eq!(push.build_retries, Some(2));
+        assert_eq!(config.image_busy_timeout, Some(Duration::from_mins(5)));
         assert_eq!(push.timeout, Some(Duration::from_secs(3600)));
         assert_eq!(config.status.timeout, push.timeout);
         assert_eq!(

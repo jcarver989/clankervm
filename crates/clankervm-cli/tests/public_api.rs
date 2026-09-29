@@ -8,9 +8,10 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::Duration;
 use support::{
-    FakeAws, IMAGE_CREATED, IMAGE_CREATING, LOG_EVENTS, LOG_STREAMS, MICROVMS_NONE,
-    MICROVMS_PAGE_RUNNING, MICROVMS_PAGE_TERMINATED, Response, VERSION_ACTIVE, VERSION_PENDING,
-    VERSIONS_PAGE_ACTIVE, VERSIONS_PAGE_DELETED,
+    BUILDS_FAILED, FakeAws, IMAGE_CREATE_FAILED, IMAGE_CREATED, IMAGE_CREATING, IMAGE_UPDATED,
+    IMAGE_UPDATING, LOG_EVENTS, LOG_STREAMS, MICROVMS_NONE, MICROVMS_PAGE_RUNNING,
+    MICROVMS_PAGE_TERMINATED, Response, VERSION_3_ACTIVE, VERSION_ACTIVE, VERSION_FAILED,
+    VERSION_PENDING, VERSIONS_PAGE_ACTIVE, VERSIONS_PAGE_DELETED,
 };
 use tempfile::TempDir;
 
@@ -30,7 +31,7 @@ iam-role = "arn:aws:iam::123456789012:role/run"
 group = "/demo/runs"
 "#;
 
-/// An image that releases and then prunes everything but the newest version.
+/// An image that prunes everything but its active version before each release.
 const PRUNING_CONFIG: &str = r#"[microvm.image]
 iam-role = "arn:aws:iam::123456789012:role/build"
 [microvm.image.artifact]
@@ -262,6 +263,28 @@ fn push_flags_populate_command_settings() {
         ["team=platform", "environment=test"]
     );
     assert_eq!(settings.ready_timeout_seconds, Some(120));
+}
+
+#[test]
+fn image_busy_timeout_is_a_global_option() {
+    let default = Cli::try_parse_from(["clankervm", "push"]).unwrap();
+    assert_eq!(
+        default.image_busy_timeout, None,
+        "unset so the project file applies"
+    );
+
+    for args in [
+        ["clankervm", "--image-busy-timeout", "90s", "push"],
+        ["clankervm", "push", "--image-busy-timeout", "90s"],
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(
+            cli.image_busy_timeout,
+            Some(Duration::from_secs(90)),
+            "{args:?}"
+        );
+    }
+    assert!(Cli::try_parse_from(["clankervm", "--image-busy-timeout", "soon", "push"]).is_err());
 }
 
 #[test]
@@ -911,18 +934,18 @@ fn run_uses_project_defaults_and_forwards_client_token() {
 }
 
 #[test]
-fn push_prunes_every_page_of_old_versions() {
+fn push_prunes_every_page_of_old_versions_before_publishing() {
     let directory = TempDir::new().unwrap();
     write_config(directory.path(), PRUNING_CONFIG);
     let fake = FakeAws::start(vec![
-        Response::ok("{}"),
-        Response::not_found(),
-        Response::ok(IMAGE_CREATING),
-        Response::ok(IMAGE_CREATED),
-        Response::ok(VERSION_ACTIVE),
         Response::ok(VERSIONS_PAGE_ACTIVE),
         Response::ok(VERSIONS_PAGE_DELETED),
         Response::ok("{}"),
+        Response::ok("{}"),
+        Response::ok(IMAGE_CREATED),
+        Response::ok(IMAGE_UPDATING),
+        Response::ok(IMAGE_UPDATED),
+        Response::ok(VERSION_3_ACTIVE),
     ]);
 
     let result = run_json(
@@ -931,15 +954,16 @@ fn push_prunes_every_page_of_old_versions() {
         &fake.url(),
     );
 
-    assert_eq!(result["release"], "demo@2");
+    assert_eq!(result["release"], "demo@3");
     let requests = fake.finish();
     assert_eq!(requests.len(), 8, "{requests:#?}");
-    assert!(requests[5].contains("maxResults=50"), "{}", requests[5]);
+    assert!(requests[0].contains("maxResults=50"), "{}", requests[0]);
     assert!(
-        requests[6].contains("nextToken=versions-2"),
+        requests[1].contains("nextToken=versions-2"),
         "{}",
-        requests[6]
+        requests[1]
     );
+    assert!(requests[2].starts_with("DELETE "), "{}", requests[2]);
     let deleted: Vec<&String> = requests
         .iter()
         .filter(|request| request.starts_with("DELETE "))
@@ -957,15 +981,15 @@ fn push_retries_pruning_while_the_image_is_updating() {
     let directory = TempDir::new().unwrap();
     write_config(directory.path(), PRUNING_CONFIG);
     let fake = FakeAws::start(vec![
-        Response::ok("{}"),
-        Response::not_found(),
-        Response::ok(IMAGE_CREATING),
-        Response::ok(IMAGE_CREATED),
-        Response::ok(VERSION_ACTIVE),
         Response::ok(VERSIONS_PAGE_ACTIVE),
         Response::ok(VERSIONS_PAGE_DELETED),
         Response::image_updating(),
         Response::ok("{}"),
+        Response::ok("{}"),
+        Response::ok(IMAGE_CREATED),
+        Response::ok(IMAGE_UPDATING),
+        Response::ok(IMAGE_UPDATED),
+        Response::ok(VERSION_3_ACTIVE),
     ]);
 
     let result = run_json(
@@ -974,7 +998,7 @@ fn push_retries_pruning_while_the_image_is_updating() {
         &fake.url(),
     );
 
-    assert_eq!(result["release"], "demo@2");
+    assert_eq!(result["release"], "demo@3");
     let requests = fake.finish();
     let deleted: Vec<&String> = requests
         .iter()
@@ -987,6 +1011,223 @@ fn push_retries_pruning_while_the_image_is_updating() {
             .all(|request| request.contains("/versions/1")),
         "{deleted:#?}"
     );
+}
+
+#[test]
+fn push_prunes_nothing_before_the_first_release() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), PRUNING_CONFIG);
+    let fake = FakeAws::start(vec![
+        Response::not_found(),
+        Response::ok("{}"),
+        Response::not_found(),
+        Response::ok(IMAGE_CREATING),
+        Response::ok(IMAGE_CREATED),
+        Response::ok(VERSION_ACTIVE),
+    ]);
+
+    let result = run_json(
+        directory.path(),
+        &["--format", "json", "push", "--timeout", "5s"],
+        &fake.url(),
+    );
+
+    assert_eq!(result["release"], "demo@2");
+    let requests = fake.finish();
+    assert!(requests[0].contains("/versions"), "{}", requests[0]);
+    assert!(requests[3].starts_with("POST "), "{}", requests[3]);
+}
+
+#[test]
+fn push_retries_the_update_while_the_image_is_busy() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), FULL_CONFIG);
+    let fake = FakeAws::start(vec![
+        Response::ok("{}"),
+        Response::ok(IMAGE_CREATED),
+        Response::image_already_updating(),
+        Response::image_in_current_state(),
+        Response::ok(IMAGE_UPDATING),
+        Response::ok(IMAGE_UPDATED),
+        Response::ok(VERSION_3_ACTIVE),
+    ]);
+
+    let result = run_json(
+        directory.path(),
+        &["--format", "json", "push", "--timeout", "5s"],
+        &fake.url(),
+    );
+
+    assert_eq!(result["release"], "demo@3");
+    let updates = fake
+        .finish()
+        .iter()
+        .filter(|request| request.starts_with("PUT /2025-09-09/microvm-images/"))
+        .count();
+    assert_eq!(updates, 3);
+}
+
+#[test]
+fn push_fails_on_a_busy_image_without_an_image_busy_timeout() {
+    let from_file = FULL_CONFIG.replace(
+        "[microvm.image]\n",
+        "[microvm.image]\nbusy-timeout = '0s'\n",
+    );
+    for (config, flags) in [
+        (FULL_CONFIG.to_owned(), &["--image-busy-timeout", "0s"][..]),
+        (from_file, &[][..]),
+    ] {
+        let directory = TempDir::new().unwrap();
+        write_config(directory.path(), &config);
+        let fake = FakeAws::start(vec![
+            Response::ok("{}"),
+            Response::ok(IMAGE_CREATED),
+            Response::image_already_updating(),
+        ]);
+
+        let output = run_cli(
+            directory.path(),
+            &[flags, &["--format", "json", "push"]].concat(),
+            &fake.url(),
+        );
+
+        assert!(!output.status.success(), "{flags:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(
+                "update image failed: ConflictException: MicroVM Image is already in state: UPDATING"
+            ),
+            "{stderr}"
+        );
+        assert_eq!(fake.finish().len(), 3);
+    }
+}
+
+#[test]
+fn image_busy_timeout_flag_overrides_the_project_file() {
+    let directory = TempDir::new().unwrap();
+    write_config(
+        directory.path(),
+        &FULL_CONFIG.replace(
+            "[microvm.image]\n",
+            "[microvm.image]\nbusy-timeout = '0s'\n",
+        ),
+    );
+    let fake = FakeAws::start(vec![
+        Response::ok("{}"),
+        Response::ok(IMAGE_CREATED),
+        Response::image_already_updating(),
+        Response::ok(IMAGE_UPDATING),
+        Response::ok(IMAGE_UPDATED),
+        Response::ok(VERSION_3_ACTIVE),
+    ]);
+
+    let result = run_json(
+        directory.path(),
+        &["--image-busy-timeout", "1m", "--format", "json", "push"],
+        &fake.url(),
+    );
+
+    assert_eq!(result["release"], "demo@3");
+    fake.finish();
+}
+
+#[test]
+fn push_reports_the_reason_aws_records_on_the_failed_builds() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), FULL_CONFIG);
+    let fake = FakeAws::start(vec![
+        Response::ok("{}"),
+        Response::not_found(),
+        Response::ok(IMAGE_CREATING),
+        Response::ok(IMAGE_CREATE_FAILED),
+        Response::ok(VERSION_FAILED),
+        Response::ok(BUILDS_FAILED),
+    ]);
+
+    let output = run_cli(
+        directory.path(),
+        &["--format", "json", "push", "--timeout", "5s"],
+        &fake.url(),
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("release demo@2 failed: Ready hook invocation timed out\n"),
+        "{stderr}"
+    );
+    let requests = fake.finish();
+    assert!(
+        requests[5].contains("/versions/2/builds"),
+        "{}",
+        requests[5]
+    );
+}
+
+#[test]
+fn push_publishes_a_new_version_after_a_failed_build() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), FULL_CONFIG);
+    let fake = FakeAws::start(vec![
+        Response::ok("{}"),
+        Response::not_found(),
+        Response::ok(IMAGE_CREATING),
+        Response::ok(IMAGE_CREATE_FAILED),
+        Response::ok(VERSION_FAILED),
+        Response::ok(BUILDS_FAILED),
+        Response::ok("{}"),
+        Response::ok(IMAGE_CREATE_FAILED),
+        Response::ok(IMAGE_UPDATING),
+        Response::ok(IMAGE_UPDATED),
+        Response::ok(VERSION_3_ACTIVE),
+    ]);
+
+    let output = run_cli(
+        directory.path(),
+        &[
+            "--format",
+            "json",
+            "push",
+            "--timeout",
+            "5s",
+            "--build-retries",
+            "1",
+        ],
+        &fake.url(),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["release"], "demo@3");
+    assert!(
+        stderr.contains("demo@2 failed: Ready hook invocation timed out; retrying"),
+        "{stderr}"
+    );
+    let requests = fake.finish();
+    assert!(
+        requests[8].starts_with("PUT "),
+        "a failed create is retried as an update: {}",
+        requests[8]
+    );
+}
+
+#[test]
+fn aws_server_errors_are_retried_beyond_the_sdk_default() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+    let fake = FakeAws::start(vec![
+        Response::html_server_error(),
+        Response::html_server_error(),
+        Response::html_server_error(),
+        Response::ok(MICROVMS_NONE),
+    ]);
+
+    let result = run_json(directory.path(), &["--format", "json", "list"], &fake.url());
+
+    assert_eq!(result["microvms"], serde_json::json!([]));
+    assert_eq!(fake.finish().len(), 4);
 }
 
 #[test]

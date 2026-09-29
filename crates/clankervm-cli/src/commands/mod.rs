@@ -13,6 +13,7 @@ use crate::application::{failure, select};
 use crate::client::AwsMicroVmClient;
 use crate::config::ProjectConfig;
 use crate::{ClankerError, Cli, OutputFormat};
+use aws_config::retry::RetryConfig;
 use aws_config::{BehaviorVersion, Region, SdkConfig};
 use aws_sdk_lambdamicrovms::config::ProvideCredentials;
 use clap::Subcommand;
@@ -32,6 +33,9 @@ pub use status::StatusOptions;
 pub(crate) use status::StatusSettings;
 use std::time::Duration;
 use tokio::time::timeout;
+
+const DEFAULT_IMAGE_BUSY_TIMEOUT: Duration = Duration::from_mins(5);
+const SDK_MAX_ATTEMPTS: u32 = 8;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -64,7 +68,8 @@ pub enum Command {
 async fn create_sdk_config(config: &ProjectConfig) -> Result<SdkConfig, ClankerError> {
     timeout(Duration::from_secs(30), async {
         let mut loader = aws_config::defaults(BehaviorVersion::latest())
-            .region(Region::new(config.aws.region.clone()));
+            .region(Region::new(config.aws.region.clone()))
+            .retry_config(RetryConfig::standard().with_max_attempts(SDK_MAX_ATTEMPTS));
         if let Some(profile) = &config.aws.profile {
             loader = loader.profile_name(profile);
         }
@@ -119,7 +124,11 @@ pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
     let config = ProjectConfig::load(&cli.config, cli.region)?;
     preflight(&cli.command, &config, cli.format)?;
     let sdk = create_sdk_config(&config).await?;
-    let client = AwsMicroVmClient::new(&sdk);
+    let image_busy_timeout = cli
+        .image_busy_timeout
+        .or(config.image_busy_timeout)
+        .unwrap_or(DEFAULT_IMAGE_BUSY_TIMEOUT);
+    let client = AwsMicroVmClient::new(&sdk, image_busy_timeout);
 
     match cli.command {
         Command::Push(options) => push::execute(&options, &config, cli.format, &client).await,

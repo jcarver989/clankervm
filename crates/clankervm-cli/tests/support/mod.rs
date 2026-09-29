@@ -34,6 +34,30 @@ impl Response {
         }
     }
 
+    /// A conflict AWS returns for an update sent while the image is busy.
+    pub fn image_already_updating() -> Self {
+        Self {
+            status: 409,
+            body: r#"{"__type":"ConflictException","message":"MicroVM Image is already in state: UPDATING"}"#,
+        }
+    }
+
+    /// The validation error AWS returns for the same busy image.
+    pub fn image_in_current_state() -> Self {
+        Self {
+            status: 400,
+            body: r#"{"__type":"ValidationException","message":"Cannot update MicroVM Image in its current state: arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"}"#,
+        }
+    }
+
+    /// A 500 whose body is not JSON, as AWS intermittently returns.
+    pub fn html_server_error() -> Self {
+        Self {
+            status: 500,
+            body: "<html><body>Internal Server Error</body></html>",
+        }
+    }
+
     /// A refusal that carries the error code and message AWS reports.
     pub fn access_denied() -> Self {
         Self {
@@ -127,6 +151,13 @@ pub const IMAGE_CREATED: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:1234567
 /// The same image while its build is still running.
 pub const IMAGE_CREATING: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","name":"demo","state":"CREATING","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role","imageVersion":"2"}"#;
 
+/// The image after the build of version 2 failed.
+pub const IMAGE_CREATE_FAILED: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","name":"demo","state":"CREATE_FAILED","latestFailedImageVersion":"2","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role","imageVersion":"2"}"#;
+/// The image while version 3 builds, as `UpdateMicrovmImage` reports it.
+pub const IMAGE_UPDATING: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","name":"demo","state":"UPDATING","latestFailedImageVersion":"2","createdAt":1787616000,"updatedAt":1787616100,"baseImageArn":"base","buildRoleArn":"role","imageVersion":"3"}"#;
+/// The image once version 3 is active.
+pub const IMAGE_UPDATED: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","name":"demo","state":"UPDATED","latestActiveImageVersion":"3","latestFailedImageVersion":"2","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role","imageVersion":"3"}"#;
+
 /// A page of image versions holding the release just activated and an older one.
 pub const VERSIONS_PAGE_ACTIVE: &str = r#"{"items":[{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"2","state":"SUCCESSFUL","status":"ACTIVE","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role"},{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"1","state":"SUCCESSFUL","status":"INACTIVE","createdAt":1787529600,"baseImageArn":"base","buildRoleArn":"role"}],"nextToken":"versions-2"}"#;
 /// The page after [`VERSIONS_PAGE_ACTIVE`], holding a version AWS is already deleting.
@@ -134,5 +165,12 @@ pub const VERSIONS_PAGE_DELETED: &str = r#"{"items":[{"imageArn":"arn:aws:lambda
 
 /// An image version that AWS reports as active.
 pub const VERSION_ACTIVE: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"2","state":"SUCCESSFUL","status":"ACTIVE","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role"}"#;
+/// A failed image version that reports no reason of its own.
+pub const VERSION_FAILED: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"2","state":"FAILED","status":"INACTIVE","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role"}"#;
+/// Version 3, active after a retried build.
+pub const VERSION_3_ACTIVE: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"3","state":"SUCCESSFUL","status":"ACTIVE","createdAt":1787616100,"baseImageArn":"base","buildRoleArn":"role"}"#;
+/// The build records of [`VERSION_FAILED`], one per chipset generation, both carrying the reason.
+pub const BUILDS_FAILED: &str = r#"{"items":[{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"2","buildId":"build-1","buildState":"FAILED","architecture":"ARM_64","chipset":"GRAVITON","chipsetGeneration":"3","stateReason":"Ready hook invocation timed out","createdAt":1787616000},{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"2","buildId":"build-2","buildState":"FAILED","architecture":"ARM_64","chipset":"GRAVITON","chipsetGeneration":"4","stateReason":"Ready hook invocation timed out","createdAt":1787616000}]}"#;
+
 /// The same image version while its build is still running.
 pub const VERSION_PENDING: &str = r#"{"imageArn":"arn:aws:lambda:us-east-1:123456789012:microvm-image:demo","imageVersion":"2","state":"PENDING","status":"INACTIVE","createdAt":1787616000,"baseImageArn":"base","buildRoleArn":"role"}"#;

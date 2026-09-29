@@ -35,6 +35,7 @@ name = "my-runner"
 
 [microvm.image]
 base-image = "al2023-1"
+busy-timeout = "5m"
 minimum-memory-mib = 512
 os-capabilities = ["ALL"]
 iam-role = "arn:aws:iam::123456789012:role/clankervm-build"
@@ -66,6 +67,7 @@ environment = ["WORKSPACE=/workspace/repo"]
 [microvm.image.versions]
 max = 10
 wait-timeout = "1h"
+build-retries = 2
 
 [microvm.run]
 iam-role = "arn:aws:iam::123456789012:role/clankervm-execution"
@@ -83,27 +85,11 @@ since = "30m"
 limit = 1000
 ```
 
-Only `aws.region` and `microvm.name` are required to load a project. Image and
-run tables are optional; each command checks its required settings (for example,
-push needs an artifact bucket and image IAM role). Unknown fields are rejected.
+- Only `aws.region` and `microvm.name` are required to load a project.
+- Command-line settings override TOML settings, e.g. `--artifact-bucket` overrides `microvm.image.artifact.s3-bucket`.
+- Artifact sources are resolved relative to the project file, defaulting to `.`.
 
-Command-line settings override TOML settings.
-For example, `--artifact-bucket` overrides `microvm.image.artifact.s3-bucket`,
-`--build-role-arn` overrides `microvm.image.iam-role`, and `--execution-role-arn`
-overrides `microvm.run.iam-role`. Lists supplied on the command line replace
-configured lists rather than appending to them. `--region` overrides `aws.region`.
-
-Artifact sources are resolved relative to the project file, defaulting to `.`.
-Hook timeouts use duration strings and must fit in a whole number of signed
-32-bit seconds; the corresponding CLI flags still accept integer seconds.
-`microvm.image.versions.max` controls pruning after a successful push; omitting
-it disables pruning. `wait-timeout` applies to both push and `status --wait`
-(default `1h`), and each command's `--timeout` overrides it.
-
-`microvm.run.logs.group` sets both the launch log destination and the group read
-by `logs`. If omitted, logs uses `/aws/lambda-microvms/<name>`. The stream is
-discovered automatically from the MicroVM ID. `since` and `limit` only affect
-log reads. `max-duration` is in seconds; log `since` uses a duration string.
+## Multiple images
 
 Use one configuration file per image:
 
@@ -130,7 +116,8 @@ clankervm push \
   --build-role-arn "$BUILD_ROLE_ARN" \
   --base-image al2023-1 \
   --tag team=platform \
-  --tag imageName=my-runner
+  --tag imageName=my-runner \
+  --build-retries 2
 ```
 
 ### Initialize before snapshotting
