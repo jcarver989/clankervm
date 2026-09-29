@@ -54,6 +54,9 @@ pub struct PushSettings {
     pub egress: Option<String>,
     #[arg(long)]
     pub keep_versions: Option<usize>,
+    /// How many times to publish a new version after a build fails.
+    #[arg(long)]
+    pub build_retries: Option<usize>,
     /// Image tag in key=value form; repeat for multiple tags.
     #[arg(long = "tag")]
     pub tags: Option<Vec<String>>,
@@ -90,6 +93,11 @@ impl Settings for PushSettings {
         validate_non_empty(self.build_role_arn.as_deref(), "microvm.image.iam-role")?;
         validate_non_empty(self.base_image.as_deref(), "microvm.image.base-image")?;
         validate_non_empty(self.egress.as_deref(), "microvm.image.network.egress")?;
+        if self.keep_versions == Some(0) {
+            return Err(ClankerError::InvalidConfig(
+                "microvm.image.versions.max must be at least 1".into(),
+            ));
+        }
         if self
             .validate_timeout_seconds
             .is_some_and(|seconds| !(1..=3600).contains(&seconds))
@@ -139,6 +147,9 @@ impl PushSettings {
     pub(crate) fn timeout(&self) -> Duration {
         self.timeout.unwrap_or(DEFAULT_TIMEOUT)
     }
+    pub(crate) fn build_retries(&self) -> usize {
+        self.build_retries.unwrap_or_default()
+    }
     pub(crate) fn base_image(&self) -> &str {
         self.base_image.as_deref().unwrap_or(DEFAULT_BASE_IMAGE)
     }
@@ -185,16 +196,12 @@ pub(super) async fn execute<T: MicroVmClient>(
     render(format, &result, || format!("✓ Released {}", result.release))
 }
 
-async fn push<T, F>(
+async fn push<T: MicroVmClient, U: FnMut(&ReleaseStatus)>(
     options: &PushOptions,
     config: &ProjectConfig,
     client: &T,
-    report: F,
-) -> Result<ReleaseStatus, ClankerError>
-where
-    T: MicroVmClient,
-    F: FnMut(&ReleaseStatus),
-{
+    mut report: U,
+) -> Result<ReleaseStatus, ClankerError> {
     let settings = config.push.merge(&options.settings)?;
     let path = config.resolve(
         options
@@ -211,38 +218,38 @@ where
 
     eprintln!("› Publishing artifact {}", &bundle.digest[..12]);
 
-    let published = client.publish(&spec, &bundle).await?;
-    let release = Release::new(&spec.name, spec.arn.clone(), &published.version)
-        .with_artifact(bundle.digest, published.artifact_uri);
+    let mut retries_left = settings.build_retries();
+    loop {
+        if let Some(max) = settings.keep_versions {
+            client.prune(&spec.arn, max - 1).await?;
+        }
+        let published = client.publish(&spec, &bundle).await?;
+        let release = Release::new(&spec.name, spec.arn.clone(), &published.version)
+            .with_artifact(bundle.digest.clone(), published.artifact_uri);
 
-    let status = wait_for_release(client, release, None, settings.timeout(), report).await?;
-    if let Some(keep) = settings.keep_versions {
-        client.prune(&spec.arn, keep).await?;
+        match wait_for_release(client, release, None, settings.timeout(), &mut report).await {
+            Err(ClankerError::ReleaseFailed {
+                release, reason, ..
+            }) if retries_left > 0 => {
+                retries_left -= 1;
+                eprintln!("› {release} failed: {reason}; retrying ({retries_left} retries left)");
+            }
+            result => return result,
+        }
     }
-    Ok(status)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::{Call, FakeMicroVmClient, MicroVmClientError};
-    use crate::test_support::{self, active};
+    use crate::client::{Call, FakeMicroVmClient, MicroVmClientError, Observation, Published};
+    use crate::test_support::{self, active, failed};
     use aws_sdk_lambdamicrovms::types::MicrovmImageVersionStatus;
+    use std::error::Error;
     use std::fs;
     use tempfile::TempDir;
 
-    /// A real project file plus a source directory to bundle.
-    fn project(directory: &Path) -> ProjectConfig {
-        fs::write(directory.join("app.py"), "print('hi')").unwrap();
-        test_support::project(
-            directory,
-            "[microvm.image]\niam-role = \"arn:aws:iam::123456789012:role/build\"\ntags = [\"team=platform\"]\n[microvm.image.artifact]\ns3-bucket = \"artifacts\"\n[microvm.image.versions]\nmax = 1\n",
-        )
-    }
-
-    fn active_client() -> FakeMicroVmClient {
-        FakeMicroVmClient::default().observed([Ok(Some(active("1")))])
-    }
+    type TestResult = Result<(), Box<dyn Error>>;
 
     #[test]
     fn push_defaults_apply_once_values_are_resolved() {
@@ -282,6 +289,10 @@ mod tests {
                 capabilities: Some(vec!["NOPE".into()]),
                 ..PushSettings::default()
             },
+            PushSettings {
+                keep_versions: Some(0),
+                ..PushSettings::default()
+            },
         ] {
             assert!(
                 matches!(settings.validate(), Err(ClankerError::InvalidConfig(_))),
@@ -291,15 +302,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_publishes_waits_and_prunes() {
-        let directory = TempDir::new().unwrap();
-        let config = project(directory.path());
-        let digest = Artifact::load(directory.path()).unwrap().digest;
+    async fn push_prunes_publishes_and_waits() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let digest = Artifact::load(directory.path())?.digest;
         let client = active_client();
 
-        let result = push(&PushOptions::default(), &config, &client, |_| {})
-            .await
-            .unwrap();
+        let result = push(&PushOptions::default(), &config, &client, |_| {}).await?;
 
         assert_eq!(result.release, "demo@1");
         assert_eq!(
@@ -308,12 +317,12 @@ mod tests {
         );
         let calls = client.calls();
         let [
+            Call::Prune(arn, keep),
             Call::Publish(spec),
             Call::Observe(..),
-            Call::Prune(arn, keep),
         ] = calls.as_slice()
         else {
-            panic!("expected publish, observe and prune, got {calls:?}");
+            return Err(format!("expected prune, publish and observe, got {calls:?}").into());
         };
         assert_eq!(
             spec.arn.as_str(),
@@ -326,88 +335,211 @@ mod tests {
             arn.as_str(),
             "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
         );
-        assert_eq!(*keep, 1);
+        assert_eq!(
+            *keep, 0,
+            "one below the maximum leaves room for the new version"
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn push_uploads_a_prebuilt_zip_without_repacking_it() {
-        let directory = TempDir::new().unwrap();
-        let config = project(directory.path());
+    async fn push_uploads_a_prebuilt_zip_without_repacking_it() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
         let zip_path = directory.path().join("image.zip");
-        let expected = Artifact::load(directory.path()).unwrap().bytes;
-        fs::write(&zip_path, &expected).unwrap();
+        let expected = Artifact::load(directory.path())?.bytes;
+        fs::write(&zip_path, &expected)?;
         let client = active_client();
         let options = PushOptions {
             source: Some(zip_path),
             ..PushOptions::default()
         };
 
-        push(&options, &config, &client, |_| {}).await.unwrap();
+        push(&options, &config, &client, |_| {}).await?;
 
         let calls = client.calls();
-        let Call::Publish(spec) = &calls[0] else {
-            panic!("expected publish, got {calls:?}");
+        let Some(Call::Publish(spec)) = calls.get(1) else {
+            return Err(format!("expected publish after prune, got {calls:?}").into());
         };
         assert_eq!(
             spec.configuration.description,
             format!("Bundle {}", crate::util::sha256_hex(&expected))
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn push_uploads_under_the_configured_artifact_prefix() {
-        let directory = TempDir::new().unwrap();
-        fs::write(directory.path().join("app.py"), "print('hi')").unwrap();
+    async fn push_uploads_under_the_configured_artifact_prefix() -> TestResult {
+        let directory = TempDir::new()?;
+        fs::write(directory.path().join("app.py"), "print('hi')")?;
         let config = test_support::project(
             directory.path(),
             "[microvm.image]\niam-role = \"arn:aws:iam::123456789012:role/build\"\n[microvm.image.artifact]\ns3-bucket = \"artifacts\"\ns3-prefix = \"employee-clanker/\"\n",
         );
         let client = active_client();
 
-        push(&PushOptions::default(), &config, &client, |_| {})
-            .await
-            .unwrap();
+        push(&PushOptions::default(), &config, &client, |_| {}).await?;
 
         let calls = client.calls();
-        let Call::Publish(spec) = &calls[0] else {
-            panic!("expected publish, got {calls:?}");
+        let Some(Call::Publish(spec)) = calls.first() else {
+            return Err(format!("expected publish, got {calls:?}").into());
         };
         assert_eq!(spec.artifact_prefix, "employee-clanker");
         assert_eq!(
             spec.artifact_key("abc"),
             "employee-clanker/demo/bundles/abc.zip"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn publish_failures_surface() {
-        let directory = TempDir::new().unwrap();
-        let config = project(directory.path());
-        let client = FakeMicroVmClient::default().published([Err(MicroVmClientError::Service {
-            operation: "create image",
-            message: "boom".into(),
-        })]);
+    async fn publish_failures_surface() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let client = FakeMicroVmClient::default().published([Err(service_error())]);
 
         let error = push(&PushOptions::default(), &config, &client, |_| {})
             .await
-            .unwrap_err();
+            .err()
+            .ok_or("expected push to fail")?;
 
         assert!(matches!(error, ClankerError::MicroVmClient(_)), "{error}");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn prune_failures_surface_after_release() {
-        let directory = TempDir::new().unwrap();
-        let config = project(directory.path());
-        let client = active_client().pruned([Err(MicroVmClientError::InvalidVersionsToKeep)]);
+    async fn prune_failures_stop_the_push_before_publishing() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let client = active_client().pruned([Err(service_error())]);
 
         let error = push(&PushOptions::default(), &config, &client, |_| {})
             .await
-            .unwrap_err();
+            .err()
+            .ok_or("expected push to fail")?;
 
-        assert!(matches!(
-            error,
-            ClankerError::MicroVmClient(MicroVmClientError::InvalidVersionsToKeep)
-        ));
+        assert!(matches!(error, ClankerError::MicroVmClient(_)), "{error}");
+        assert!(matches!(client.calls().as_slice(), [Call::Prune(..)]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn push_publishes_a_new_version_after_a_failed_build() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let client = FakeMicroVmClient::default()
+            .published(published(&["1", "2"]))
+            .observed([Ok(Some(failed("1"))), Ok(Some(active("2")))]);
+
+        let result = push(&retrying(1), &config, &client, |_| {}).await?;
+
+        assert_eq!(result.release, "demo@2");
+        let calls = client.calls();
+        let [
+            Call::Prune(_, 0),
+            Call::Publish(_),
+            Call::Observe(_, Some(first)),
+            Call::Prune(_, 0),
+            Call::Publish(_),
+            Call::Observe(_, Some(second)),
+        ] = calls.as_slice()
+        else {
+            return Err(format!(
+                "expected each attempt to prune, publish and observe, got {calls:?}"
+            )
+            .into());
+        };
+        assert_eq!((first.as_str(), second.as_str()), ("1", "2"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn push_reports_the_last_failed_build_once_retries_run_out() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let last = Observation {
+            state_reason: Some("Ready hook invocation timed out".into()),
+            ..failed("2")
+        };
+        let client = FakeMicroVmClient::default()
+            .published(published(&["1", "2"]))
+            .observed([Ok(Some(failed("1"))), Ok(Some(last))]);
+
+        let error = push(&retrying(1), &config, &client, |_| {})
+            .await
+            .err()
+            .ok_or("expected push to fail")?;
+
+        let ClankerError::ReleaseFailed {
+            release, reason, ..
+        } = error
+        else {
+            return Err(format!("expected release failure, got {error}").into());
+        };
+        assert_eq!(release, "demo@2");
+        assert_eq!(reason, "Ready hook invocation timed out");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn push_retries_only_failed_builds() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let client = FakeMicroVmClient::default().observed([Err(service_error())]);
+
+        let error = push(&retrying(1), &config, &client, |_| {})
+            .await
+            .err()
+            .ok_or("expected push to fail")?;
+
+        assert!(matches!(error, ClankerError::MicroVmClient(_)), "{error}");
+        let publishes = client
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, Call::Publish(_)))
+            .count();
+        assert_eq!(publishes, 1);
+        Ok(())
+    }
+
+    fn project(directory: &Path) -> std::io::Result<ProjectConfig> {
+        fs::write(directory.join("app.py"), "print('hi')")?;
+        Ok(test_support::project(
+            directory,
+            "[microvm.image]\niam-role = \"arn:aws:iam::123456789012:role/build\"\ntags = [\"team=platform\"]\n[microvm.image.artifact]\ns3-bucket = \"artifacts\"\n[microvm.image.versions]\nmax = 1\n",
+        ))
+    }
+
+    fn active_client() -> FakeMicroVmClient {
+        FakeMicroVmClient::default().observed([Ok(Some(active("1")))])
+    }
+
+    fn retrying(build_retries: usize) -> PushOptions {
+        PushOptions {
+            settings: PushSettings {
+                build_retries: Some(build_retries),
+                ..PushSettings::default()
+            },
+            ..PushOptions::default()
+        }
+    }
+
+    fn published(versions: &[&str]) -> Vec<Result<Published, MicroVmClientError>> {
+        versions
+            .iter()
+            .map(|version| {
+                Ok(Published {
+                    version: (*version).into(),
+                    artifact_uri: "s3://artifacts/demo.zip".into(),
+                })
+            })
+            .collect()
+    }
+
+    fn service_error() -> MicroVmClientError {
+        MicroVmClientError::Service {
+            operation: "get image",
+            message: "boom".into(),
+        }
     }
 }

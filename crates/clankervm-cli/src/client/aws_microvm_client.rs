@@ -6,26 +6,27 @@ use super::microvm_client::{
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
+use crate::util::POLL_INTERVAL;
 use aws_config::SdkConfig;
 use aws_sdk_cloudwatchlogs::types::OutputLogEvent;
 use aws_sdk_lambdamicrovms::error::{ProvideErrorMetadata, SdkError};
-use aws_sdk_lambdamicrovms::operation::delete_microvm_image_version::DeleteMicrovmImageVersionError;
 use aws_sdk_lambdamicrovms::operation::get_microvm::GetMicrovmError;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image::GetMicrovmImageError;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image::GetMicrovmImageOutput;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image_version::GetMicrovmImageVersionError;
 use aws_sdk_lambdamicrovms::operation::get_microvm_image_version::GetMicrovmImageVersionOutput;
+use aws_sdk_lambdamicrovms::operation::list_microvm_image_versions::ListMicrovmImageVersionsError;
 use aws_sdk_lambdamicrovms::operation::terminate_microvm::TerminateMicrovmError;
 use aws_sdk_lambdamicrovms::types::{
-    CloudWatchLogging, CodeArtifact, Logging, MicrovmImageVersionState, MicrovmImageVersionStatus,
-    PortSpecification,
+    BuildState, CloudWatchLogging, CodeArtifact, Logging, MicrovmImageVersionState,
+    MicrovmImageVersionStatus, PortSpecification,
 };
 use aws_sdk_s3::primitives::ByteStream;
 use aws_smithy_types::DateTime;
 use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep};
 
 /// MicroVMs requested per listing page.
 const LIST_PAGE_SIZE: i32 = 50;
@@ -37,24 +38,23 @@ const STREAMS_PAGE_SIZE: i32 = 50;
 const EVENTS_PAGE_SIZE: usize = 10_000;
 /// Image versions requested per page while pruning.
 const VERSIONS_PAGE_SIZE: i32 = 50;
-/// Retries after AWS briefly rejects pruning while the image is updating.
-const DELETE_VERSION_RETRIES: usize = 5;
-/// Time between retries of a version deletion blocked by an image update.
-const DELETE_VERSION_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(crate) struct AwsMicroVmClient {
     logs: aws_sdk_cloudwatchlogs::Client,
     microvms: aws_sdk_lambdamicrovms::Client,
     s3: aws_sdk_s3::Client,
+    /// How long an image change keeps retrying while AWS reports the image busy.
+    image_busy_timeout: Duration,
 }
 
 impl AwsMicroVmClient {
-    pub(crate) fn new(sdk: &SdkConfig) -> Self {
+    pub(crate) fn new(sdk: &SdkConfig, image_busy_timeout: Duration) -> Self {
         Self {
             logs: aws_sdk_cloudwatchlogs::Client::new(sdk),
             microvms: aws_sdk_lambdamicrovms::Client::new(sdk),
             s3: aws_sdk_s3::Client::new(sdk),
+            image_busy_timeout,
         }
     }
 
@@ -151,31 +151,45 @@ impl AwsMicroVmClient {
             .image_version)
     }
 
+    /// Why a version's builds failed, for failures that report no reason on
+    /// the version itself. Best effort: an unreadable build record must not
+    /// hide that the build failed.
+    async fn build_failure_reason(&self, image: &Arn, version: &str) -> Option<String> {
+        let builds: Vec<_> = self
+            .microvms
+            .list_microvm_image_builds()
+            .image_identifier(image.as_str())
+            .image_version(version)
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await
+            .ok()?;
+        let mut reasons: Vec<String> = builds
+            .into_iter()
+            .filter(|build| build.build_state == BuildState::Failed)
+            .filter_map(|build| build.state_reason)
+            .collect();
+        reasons.sort();
+        reasons.dedup();
+        (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+
     async fn delete_image_version(
         &self,
         image: &Arn,
         version: &str,
     ) -> Result<(), MicroVmClientError> {
-        let mut retries = 0;
-        loop {
-            let result = self
-                .microvms
+        retry_while_busy("delete image version", self.image_busy_timeout, || {
+            self.microvms
                 .delete_microvm_image_version()
                 .image_identifier(image.as_str())
                 .image_version(version)
                 .send()
-                .await;
-            match result {
-                Ok(_) => return Ok(()),
-                Err(error) if retries < DELETE_VERSION_RETRIES && is_updating_conflict(&error) => {
-                    retries += 1;
-                    sleep(DELETE_VERSION_RETRY_INTERVAL).await;
-                }
-                Err(error) => {
-                    return Err(MicroVmClientError::service("delete image version", &error));
-                }
-            }
-        }
+        })
+        .await
+        .map(drop)
     }
 
     async fn update_image(
@@ -184,23 +198,23 @@ impl AwsMicroVmClient {
         artifact_uri: &str,
     ) -> Result<String, MicroVmClientError> {
         let configuration = &spec.configuration;
-        let version = self
-            .microvms
-            .update_microvm_image()
-            .image_identifier(spec.arn.as_str())
-            .code_artifact(CodeArtifact::Uri(artifact_uri.into()))
-            .base_image_arn(configuration.base_image_arn.as_str())
-            .build_role_arn(configuration.build_role_arn.as_str())
-            .description(&configuration.description)
-            .egress_network_connectors(configuration.egress_network_connector.as_str())
-            .hooks(configuration.hooks.clone())
-            .set_environment_variables(Some(configuration.environment_variables.clone()))
-            .set_resources(configuration.resources.clone())
-            .set_additional_os_capabilities(Some(configuration.capabilities.clone()))
-            .send()
-            .await
-            .map_err(|error| MicroVmClientError::service("update image", &error))?
-            .image_version;
+        let version = retry_while_busy("update image", self.image_busy_timeout, || {
+            self.microvms
+                .update_microvm_image()
+                .image_identifier(spec.arn.as_str())
+                .code_artifact(CodeArtifact::Uri(artifact_uri.into()))
+                .base_image_arn(configuration.base_image_arn.as_str())
+                .build_role_arn(configuration.build_role_arn.as_str())
+                .description(&configuration.description)
+                .egress_network_connectors(configuration.egress_network_connector.as_str())
+                .hooks(configuration.hooks.clone())
+                .set_environment_variables(Some(configuration.environment_variables.clone()))
+                .set_resources(configuration.resources.clone())
+                .set_additional_os_capabilities(Some(configuration.capabilities.clone()))
+                .send()
+        })
+        .await?
+        .image_version;
         if !spec.tags.is_empty() {
             self.microvms
                 .tag_resource()
@@ -251,20 +265,25 @@ impl MicroVmClient for AwsMicroVmClient {
         let Some(version_output) = self.get_image_version(image, &image_version).await? else {
             return Ok(None);
         };
+        let version_state = version_output.state().clone();
+        let version_status = version_output.status().clone();
+        let state_reason = match version_output.state_reason {
+            None if version_state == MicrovmImageVersionState::Failed => {
+                self.build_failure_reason(image, &image_version).await
+            }
+            reason => reason,
+        };
         Ok(Some(Observation {
             image_version,
             image_state: Some(image_state),
-            version_state: version_output.state().clone(),
-            version_status: version_output.status().clone(),
-            state_reason: version_output.state_reason,
+            version_state,
+            version_status,
+            state_reason,
         }))
     }
 
     async fn prune(&self, image: &Arn, keep: usize) -> Result<(), MicroVmClientError> {
-        if keep == 0 {
-            return Err(MicroVmClientError::InvalidVersionsToKeep);
-        }
-        let mut versions = self
+        let listed = self
             .microvms
             .list_microvm_image_versions()
             .image_identifier(image.as_str())
@@ -273,8 +292,21 @@ impl MicroVmClient for AwsMicroVmClient {
             .items()
             .send()
             .try_collect()
-            .await
-            .map_err(|error| MicroVmClientError::service("list image versions", &error))?;
+            .await;
+        let mut versions = match listed {
+            Ok(versions) => versions,
+            // A first push prunes before its image exists.
+            Err(error)
+                if error.as_service_error().is_some_and(
+                    ListMicrovmImageVersionsError::is_resource_not_found_exception,
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(MicroVmClientError::service("list image versions", &error));
+            }
+        };
 
         versions.retain(|version| {
             !matches!(
@@ -530,13 +562,42 @@ impl MicroVmClient for AwsMicroVmClient {
     }
 }
 
-fn is_updating_conflict<R>(error: &SdkError<DeleteMicrovmImageVersionError, R>) -> bool {
-    error.as_service_error().is_some_and(|error| {
-        error.is_conflict_exception()
-            && error
-                .message()
-                .is_some_and(|message| message.to_ascii_lowercase().contains("updating"))
-    })
+/// Retries `send` while AWS rejects it because the image is still settling
+/// from an earlier change, such as a version deletion.
+async fn retry_while_busy<T, E, R, F, Fut>(
+    operation: &'static str,
+    timeout: Duration,
+    mut send: F,
+) -> Result<T, MicroVmClientError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, SdkError<E, R>>>,
+    E: ProvideErrorMetadata + std::error::Error,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        match send().await {
+            Ok(output) => return Ok(output),
+            Err(error) if is_image_busy(&error) && Instant::now() < deadline => {
+                sleep(POLL_INTERVAL).await;
+            }
+            Err(error) => return Err(MicroVmClientError::service(operation, &error)),
+        }
+    }
+}
+
+/// AWS words a busy image two ways: a conflict such as `MicroVM Image is
+/// already in state: UPDATING`, and a validation error `Cannot update MicroVM
+/// Image in its current state`.
+fn is_image_busy<E: ProvideErrorMetadata, R>(error: &SdkError<E, R>) -> bool {
+    let message = error.message().unwrap_or_default().to_ascii_lowercase();
+    match error.code() {
+        Some("ConflictException") => {
+            message.contains("updating") || message.contains("already in state")
+        }
+        Some("ValidationException") => message.contains("in its current state"),
+        _ => false,
+    }
 }
 
 fn tags(spec: &ImageSpec) -> HashMap<String, String> {

@@ -361,7 +361,8 @@ pub(crate) trait MicroVmClient: Send + Sync {
         version: Option<&str>,
     ) -> Result<Option<Observation>, MicroVmClientError>;
 
-    /// Deletes inactive versions beyond the newest `keep`.
+    /// Deletes inactive versions beyond the newest `keep`; an image that does
+    /// not exist yet has nothing to delete.
     async fn prune(&self, image: &Arn, keep: usize) -> Result<(), MicroVmClientError>;
 
     /// One page of MicroVMs and the token of the page after it.

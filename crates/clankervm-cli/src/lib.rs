@@ -34,6 +34,8 @@ pub struct Cli {
     pub format: OutputFormat,
     #[arg(long, global = true)]
     pub region: Option<String>,
+    #[arg(long, global = true, value_parser = humantime::parse_duration)]
+    pub image_busy_timeout: Option<Duration>,
     #[command(subcommand)]
     pub command: Command,
 }
