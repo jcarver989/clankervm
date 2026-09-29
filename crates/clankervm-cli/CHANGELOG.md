@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.6...clankervm-v0.1.7) - 2026-09-29
+
+### Added
+
+- *(cli)* make image pushes resilient to build failures and busy images ([#15](https://github.com/jcarver989/clankervm/pull/15))
+
 ## [0.1.6](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.5...clankervm-v0.1.6) - 2026-09-19
 
 ### Added
