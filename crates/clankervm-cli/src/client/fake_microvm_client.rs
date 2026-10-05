@@ -1,7 +1,8 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
     AuthToken, AuthTokenExpiration, ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogPage,
-    LogQuery, MicroVmClient, MicroVmDetails, MicroVmPage, Observation, Published, ShellToken,
+    LogQuery, MicroVmClient, MicroVmDetails, MicroVmPage, Observation, PruneReport, Published,
+    ShellToken,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
@@ -42,7 +43,7 @@ pub(crate) struct FakeMicroVmClient {
 struct State {
     published: VecDeque<Result<Published, MicroVmClientError>>,
     observed: VecDeque<Result<Option<Observation>, MicroVmClientError>>,
-    pruned: VecDeque<Result<(), MicroVmClientError>>,
+    pruned: VecDeque<Result<Option<PruneReport>, MicroVmClientError>>,
     listed: VecDeque<Result<MicroVmPage, MicroVmClientError>>,
     launched: VecDeque<Result<Launch, MicroVmClientError>>,
     streams: VecDeque<Result<Vec<String>, MicroVmClientError>>,
@@ -76,7 +77,7 @@ impl FakeMicroVmClient {
 
     pub(crate) fn pruned(
         self,
-        responses: impl IntoIterator<Item = Result<(), MicroVmClientError>>,
+        responses: impl IntoIterator<Item = Result<Option<PruneReport>, MicroVmClientError>>,
     ) -> Self {
         self.lock().pruned = responses.into_iter().collect();
         self
@@ -245,11 +246,15 @@ impl MicroVmClient for FakeMicroVmClient {
         .await
     }
 
-    async fn prune(&self, image: &Arn, keep: usize) -> Result<(), MicroVmClientError> {
+    async fn prune(
+        &self,
+        image: &Arn,
+        keep: usize,
+    ) -> Result<Option<PruneReport>, MicroVmClientError> {
         self.answer(
             Call::Prune(image.clone(), keep),
             |state| state.pruned.pop_front(),
-            || Ok(()),
+            || Ok(Some(PruneReport::default())),
         )
         .await
     }

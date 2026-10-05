@@ -51,6 +51,10 @@ clankervm status
 clankervm status NAME@VERSION
 clankervm status --wait NAME@VERSION
 
+# Delete old image versions that no MicroVM uses
+clankervm prune
+clankervm prune --keep-versions 3
+
 # List MicroVMs
 clankervm list
 clankervm list --image NAME --state RUNNING

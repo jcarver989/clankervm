@@ -1,8 +1,8 @@
 use super::error::MicroVmClientError;
 use super::microvm_client::{
     AuthToken, AuthTokenExpiration, ImageIdentifier, ImageSpec, Launch, LaunchSpec, LogEvent,
-    LogPage, LogQuery, MicroVmClient, MicroVmDetails, MicroVmSummary, Observation, Published,
-    ShellToken,
+    LogPage, LogQuery, MicroVmClient, MicroVmDetails, MicroVmSummary, Observation, PruneReport,
+    Published, ShellToken,
 };
 use crate::arn::Arn;
 use crate::artifact::Artifact;
@@ -333,7 +333,11 @@ impl MicroVmClient for AwsMicroVmClient {
         }))
     }
 
-    async fn prune(&self, image: &Arn, keep: usize) -> Result<(), MicroVmClientError> {
+    async fn prune(
+        &self,
+        image: &Arn,
+        keep: usize,
+    ) -> Result<Option<PruneReport>, MicroVmClientError> {
         let listed = self
             .microvms
             .list_microvm_image_versions()
@@ -346,13 +350,14 @@ impl MicroVmClient for AwsMicroVmClient {
             .await;
         let mut versions = match listed {
             Ok(versions) => versions,
-            // A first push prunes before its image exists.
+            // A first push prunes before its image exists; callers decide
+            // whether a missing image is an error.
             Err(error)
                 if error.as_service_error().is_some_and(
                     ListMicrovmImageVersionsError::is_resource_not_found_exception,
                 ) =>
             {
-                return Ok(());
+                return Ok(None);
             }
             Err(error) => {
                 return Err(MicroVmClientError::service("list image versions", &error));
@@ -376,6 +381,14 @@ impl MicroVmClient for AwsMicroVmClient {
                 && *version.status() == MicrovmImageVersionStatus::Active
         });
 
+        let mut report = PruneReport {
+            kept: launchable
+                .iter()
+                .take(keep)
+                .map(|version| version.image_version().to_owned())
+                .collect(),
+            ..PruneReport::default()
+        };
         for version in launchable.into_iter().skip(keep).chain(rest) {
             let name = version.image_version();
             let mut in_use = self.is_image_version_in_use(image, name).await?;
@@ -384,16 +397,20 @@ impl MicroVmClient for AwsMicroVmClient {
                 self.deactivate_image_version(image, name).await?;
                 sleep(POLL_INTERVAL).await;
                 in_use = self.is_image_version_in_use(image, name).await?;
+                if in_use {
+                    report.deactivated.push(name.to_owned());
+                }
             }
 
             if in_use {
-                eprintln!("› Keeping image version {name}: MicroVMs still reference it");
+                report.in_use.push(name.to_owned());
                 continue;
             }
 
             self.delete_image_version(image, name).await?;
+            report.deleted.push(name.to_owned());
         }
-        Ok(())
+        Ok(Some(report))
     }
 
     async fn list_microvms(
