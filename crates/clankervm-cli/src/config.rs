@@ -2,7 +2,7 @@ use crate::ClankerError;
 use crate::application::validate_path;
 use crate::arn::Arn;
 use crate::client::{ImageConfiguration, ImageSpec};
-use crate::commands::{LogsSettings, PushSettings, RunSettings, StatusSettings};
+use crate::commands::{LogsSettings, PruneSettings, PushSettings, RunSettings, StatusSettings};
 use crate::payload::build_image_hook_payload;
 use crate::util::{parse_key_values, parse_release, validate_non_empty};
 use aws_sdk_lambdamicrovms::types::{HookState, Hooks, MicrovmHooks, MicrovmImageHooks, Resources};
@@ -23,6 +23,7 @@ pub struct ProjectConfig {
     pub name: String,
     pub push: PushSettings,
     pub status: StatusSettings,
+    pub prune: PruneSettings,
     pub run: RunSettings,
     pub logs: LogsSettings,
     pub connections: BTreeMap<String, ConnectionSettings>,
@@ -240,6 +241,9 @@ impl TryFrom<ProjectFile> for ProjectConfig {
             },
             status: StatusSettings {
                 timeout: image.versions.wait_timeout,
+            },
+            prune: PruneSettings {
+                keep_versions: image.versions.max,
             },
             run: RunSettings {
                 command: run.command,
@@ -723,6 +727,7 @@ iam-role = "arn:aws:iam::123456789012:role/run"
         assert_eq!(config.image_busy_timeout, Some(Duration::from_mins(5)));
         assert_eq!(push.timeout, Some(Duration::from_secs(3600)));
         assert_eq!(config.status.timeout, push.timeout);
+        assert_eq!(config.prune.keep_versions, push.keep_versions);
         assert_eq!(
             config.run.execution_role_arn.as_deref(),
             Some("arn:aws:iam::123456789012:role/clankervm-execution")

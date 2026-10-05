@@ -34,6 +34,16 @@ pub(crate) fn validate_non_empty(value: Option<&str>, name: &str) -> Result<(), 
     Ok(())
 }
 
+/// Pruning always leaves at least one launchable version to fall back to.
+pub(crate) fn validate_keep_versions(keep: Option<usize>) -> Result<(), ClankerError> {
+    if keep == Some(0) {
+        return Err(ClankerError::InvalidConfig(
+            "microvm.image.versions.max must be at least 1".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, ClankerError> {
     match value {
         Some(value) if !value.trim().is_empty() => Ok(value),

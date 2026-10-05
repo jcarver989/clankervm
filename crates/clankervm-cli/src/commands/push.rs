@@ -3,7 +3,7 @@ use crate::client::MicroVmClient;
 use crate::config::{ProjectConfig, Settings};
 use crate::output::{ReleaseProgress, render};
 use crate::release::{Release, ReleaseStatus, wait_for_release};
-use crate::util::{parse_key_values, required, validate_non_empty};
+use crate::util::{parse_key_values, required, validate_keep_versions, validate_non_empty};
 use crate::{ClankerError, OutputFormat};
 use aws_sdk_lambdamicrovms::types::Capability;
 use clap::Args;
@@ -93,11 +93,7 @@ impl Settings for PushSettings {
         validate_non_empty(self.build_role_arn.as_deref(), "microvm.image.iam-role")?;
         validate_non_empty(self.base_image.as_deref(), "microvm.image.base-image")?;
         validate_non_empty(self.egress.as_deref(), "microvm.image.network.egress")?;
-        if self.keep_versions == Some(0) {
-            return Err(ClankerError::InvalidConfig(
-                "microvm.image.versions.max must be at least 1".into(),
-            ));
-        }
+        validate_keep_versions(self.keep_versions)?;
         if self
             .validate_timeout_seconds
             .is_some_and(|seconds| !(1..=3600).contains(&seconds))
@@ -221,7 +217,10 @@ async fn push<T: MicroVmClient, U: FnMut(&ReleaseStatus)>(
     let mut retries_left = settings.build_retries();
     loop {
         if let Some(max) = settings.keep_versions {
-            client.prune(&spec.arn, (max - 1).max(1)).await?;
+            let pruned = client.prune(&spec.arn, (max - 1).max(1)).await?;
+            for version in pruned.iter().flat_map(|report| &report.in_use) {
+                eprintln!("› Keeping image version {version}: MicroVMs still reference it");
+            }
         }
         let published = client.publish(&spec, &bundle).await?;
         let release = Release::new(&spec.name, spec.arn.clone(), &published.version)

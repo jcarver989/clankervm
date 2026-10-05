@@ -57,6 +57,21 @@ pub(crate) struct Published {
     pub artifact_uri: String,
 }
 
+/// The versions one prune kept, deleted, and spared, newest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PruneReport {
+    /// The newest launchable versions, up to the requested count.
+    pub kept: Vec<String>,
+    /// Versions deleted.
+    pub deleted: Vec<String>,
+    /// Versions spared because MicroVMs still reference them.
+    pub in_use: Vec<String>,
+    /// The versions in `in_use` that were deactivated before a MicroVM was
+    /// found using them; they stay inactive, so nothing new can launch them.
+    pub deactivated: Vec<String>,
+}
+
 /// What AWS currently reports for one image release.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -362,9 +377,12 @@ pub(crate) trait MicroVmClient: Send + Sync {
     ) -> Result<Option<Observation>, MicroVmClientError>;
 
     /// Deletes versions beyond the newest `keep` launchable ones, sparing any
-    /// still referenced by MicroVMs; an image that does not exist yet has
-    /// nothing to delete.
-    async fn prune(&self, image: &Arn, keep: usize) -> Result<(), MicroVmClientError>;
+    /// still referenced by MicroVMs; `None` when the image does not exist.
+    async fn prune(
+        &self,
+        image: &Arn,
+        keep: usize,
+    ) -> Result<Option<PruneReport>, MicroVmClientError>;
 
     /// One page of MicroVMs and the token of the page after it.
     async fn list_microvms(

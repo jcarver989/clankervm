@@ -4,6 +4,7 @@ mod init;
 mod lifecycle;
 mod list;
 mod logs;
+mod prune;
 mod push;
 mod run;
 mod shell;
@@ -24,6 +25,8 @@ pub use lifecycle::LifecycleOptions;
 pub use list::ListOptions;
 pub use logs::LogsOptions;
 pub(crate) use logs::LogsSettings;
+pub use prune::PruneOptions;
+pub(crate) use prune::PruneSettings;
 pub use push::PushOptions;
 pub(crate) use push::PushSettings;
 pub use run::RunOptions;
@@ -45,6 +48,8 @@ pub enum Command {
     Push(PushOptions),
     /// Inspect a release, optionally waiting for it to become active.
     Status(StatusOptions),
+    /// Delete old image versions that no MicroVM still uses.
+    Prune(PruneOptions),
     /// List MicroVMs in the account.
     List(ListOptions),
     /// Start a command in a MicroVM.
@@ -107,6 +112,7 @@ fn preflight(
         Command::Connect(options) => {
             select(config, &options.name, options.connect_timeout, format).map(drop)
         }
+        Command::Prune(options) => options.keep_versions(config).map(drop),
         _ => Ok(()),
     }
 }
@@ -133,6 +139,7 @@ pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
     match cli.command {
         Command::Push(options) => push::execute(&options, &config, cli.format, &client).await,
         Command::Status(options) => status::execute(&options, &config, cli.format, &client).await,
+        Command::Prune(options) => prune::execute(&options, &config, cli.format, &client).await,
         Command::List(options) => list::execute(&options, &config, cli.format, &client).await,
         Command::Run(options) => run::run(options, &config, cli.format, &client).await,
         Command::Connect(options) => connect::connect(options, &config, cli.format, &client).await,
