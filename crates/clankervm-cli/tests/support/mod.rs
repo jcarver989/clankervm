@@ -6,23 +6,31 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::Duration;
+
+/// How long [`FakeAws::finish`] waits for a scripted request that has not arrived.
+const FINISH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One scripted HTTP response.
 pub struct Response {
     pub status: u16,
-    pub body: &'static str,
+    pub body: String,
 }
 
 impl Response {
-    pub fn ok(body: &'static str) -> Self {
-        Self { status: 200, body }
+    pub fn ok(body: impl Into<String>) -> Self {
+        Self {
+            status: 200,
+            body: body.into(),
+        }
     }
 
     pub fn not_found() -> Self {
         Self {
             status: 404,
-            body: r#"{"__type":"ResourceNotFoundException"}"#,
+            body: r#"{"__type":"ResourceNotFoundException"}"#.into(),
         }
     }
 
@@ -30,7 +38,8 @@ impl Response {
     pub fn image_updating() -> Self {
         Self {
             status: 409,
-            body: r#"{"__type":"ConflictException","message":"The image is currently Updating"}"#,
+            body: r#"{"__type":"ConflictException","message":"The image is currently Updating"}"#
+                .into(),
         }
     }
 
@@ -38,7 +47,7 @@ impl Response {
     pub fn image_already_updating() -> Self {
         Self {
             status: 409,
-            body: r#"{"__type":"ConflictException","message":"MicroVM Image is already in state: UPDATING"}"#,
+            body: r#"{"__type":"ConflictException","message":"MicroVM Image is already in state: UPDATING"}"#.into(),
         }
     }
 
@@ -46,7 +55,7 @@ impl Response {
     pub fn image_in_current_state() -> Self {
         Self {
             status: 400,
-            body: r#"{"__type":"ValidationException","message":"Cannot update MicroVM Image in its current state: arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"}"#,
+            body: r#"{"__type":"ValidationException","message":"Cannot update MicroVM Image in its current state: arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"}"#.into(),
         }
     }
 
@@ -54,7 +63,7 @@ impl Response {
     pub fn html_server_error() -> Self {
         Self {
             status: 500,
-            body: "<html><body>Internal Server Error</body></html>",
+            body: "<html><body>Internal Server Error</body></html>".into(),
         }
     }
 
@@ -62,7 +71,8 @@ impl Response {
     pub fn access_denied() -> Self {
         Self {
             status: 403,
-            body: r#"{"__type":"AccessDeniedException","message":"not allowed to list MicroVMs"}"#,
+            body: r#"{"__type":"AccessDeniedException","message":"not allowed to list MicroVMs"}"#
+                .into(),
         }
     }
 }
@@ -70,15 +80,17 @@ impl Response {
 /// A local AWS endpoint that answers scripted responses and records requests.
 pub struct FakeAws {
     address: String,
-    join: thread::JoinHandle<Vec<String>>,
+    expected: usize,
+    requests: Receiver<String>,
 }
 
 impl FakeAws {
     pub fn start(responses: Vec<Response>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let join = thread::spawn(move || {
-            let mut requests = Vec::new();
+        let expected = responses.len();
+        let (sender, requests) = mpsc::channel();
+        thread::spawn(move || {
             for response in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut bytes = Vec::new();
@@ -108,7 +120,8 @@ impl FakeAws {
                     let read = stream.read(&mut buffer).unwrap();
                     bytes.extend_from_slice(&buffer[..read]);
                 }
-                requests.push(String::from_utf8_lossy(&bytes).into_owned());
+                // `finish` may have given up waiting and dropped the receiver.
+                let _ = sender.send(String::from_utf8_lossy(&bytes).into_owned());
                 write!(
                     stream,
                     "HTTP/1.1 {} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -118,18 +131,34 @@ impl FakeAws {
                 )
                 .unwrap();
             }
-            requests
         });
-        Self { address, join }
+        Self {
+            address,
+            expected,
+            requests,
+        }
     }
 
     pub fn url(&self) -> String {
         format!("http://{}", self.address)
     }
 
-    /// Waits for the scripted requests and returns them.
     pub fn finish(self) -> Vec<String> {
-        self.join.join().unwrap()
+        let mut requests = Vec::with_capacity(self.expected);
+        while requests.len() < self.expected {
+            let request = self
+                .requests
+                .recv_timeout(FINISH_TIMEOUT)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} of {} scripted responses were never requested ({error}): {requests:#?}",
+                        self.expected - requests.len(),
+                        self.expected
+                    )
+                });
+            requests.push(request);
+        }
+        requests
     }
 }
 
