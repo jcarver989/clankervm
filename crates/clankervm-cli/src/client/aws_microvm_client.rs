@@ -19,10 +19,11 @@ use aws_sdk_lambdamicrovms::operation::list_microvm_image_versions::ListMicrovmI
 use aws_sdk_lambdamicrovms::operation::terminate_microvm::TerminateMicrovmError;
 use aws_sdk_lambdamicrovms::types::{
     BuildState, CloudWatchLogging, CodeArtifact, Logging, MicrovmImageVersionState,
-    MicrovmImageVersionStatus, PortSpecification,
+    MicrovmImageVersionStatus, MicrovmState, PortSpecification,
 };
 use aws_sdk_s3::primitives::ByteStream;
 use aws_smithy_types::DateTime;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
@@ -176,6 +177,56 @@ impl AwsMicroVmClient {
         (!reasons.is_empty()).then(|| reasons.join("; "))
     }
 
+    async fn is_image_version_in_use(
+        &self,
+        image: &Arn,
+        version: &str,
+    ) -> Result<bool, MicroVmClientError> {
+        let mut microvms = self
+            .microvms
+            .list_microvms()
+            .image_identifier(image.as_str())
+            .image_version(version)
+            .into_paginator()
+            .page_size(LIST_PAGE_SIZE)
+            .items()
+            .send();
+
+        while let Some(vm) = microvms
+            .try_next()
+            .await
+            .map_err(|error| MicroVmClientError::service("list MicroVMs before pruning", &error))?
+        {
+            if *vm.state() != MicrovmState::Terminated {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn deactivate_image_version(
+        &self,
+        image: &Arn,
+        version: &str,
+    ) -> Result<(), MicroVmClientError> {
+        let output = retry_while_busy("deactivate image version", self.image_busy_timeout, || {
+            self.microvms
+                .update_microvm_image_version()
+                .image_identifier(image.as_str())
+                .image_version(version)
+                .status(MicrovmImageVersionStatus::Inactive)
+                .send()
+        })
+        .await?;
+        if *output.status() != MicrovmImageVersionStatus::Inactive {
+            return Err(MicroVmClientError::Service {
+                operation: "deactivate image version",
+                message: format!("version {version} is not INACTIVE; refusing to delete it"),
+            });
+        }
+        Ok(())
+    }
+
     async fn delete_image_version(
         &self,
         image: &Arn,
@@ -309,18 +360,38 @@ impl MicroVmClient for AwsMicroVmClient {
         };
 
         versions.retain(|version| {
-            !matches!(
-                version.state(),
-                MicrovmImageVersionState::Deleting | MicrovmImageVersionState::Deleted
+            matches!(
+                (version.status(), version.state()),
+                (
+                    MicrovmImageVersionStatus::Active | MicrovmImageVersionStatus::Inactive,
+                    MicrovmImageVersionState::Successful
+                        | MicrovmImageVersionState::Failed
+                        | MicrovmImageVersionState::DeleteFailed
+                )
             )
         });
-        versions.sort_by_key(|version| std::cmp::Reverse(version.created_at().secs()));
-        for version in versions.into_iter().skip(keep) {
-            if *version.status() == MicrovmImageVersionStatus::Active {
+        versions.sort_by_key(|version| Reverse(*version.created_at()));
+        let (launchable, rest): (Vec<_>, Vec<_>) = versions.into_iter().partition(|version| {
+            *version.state() == MicrovmImageVersionState::Successful
+                && *version.status() == MicrovmImageVersionStatus::Active
+        });
+
+        for version in launchable.into_iter().skip(keep).chain(rest) {
+            let name = version.image_version();
+            let mut in_use = self.is_image_version_in_use(image, name).await?;
+
+            if !in_use && *version.status() == MicrovmImageVersionStatus::Active {
+                self.deactivate_image_version(image, name).await?;
+                sleep(POLL_INTERVAL).await;
+                in_use = self.is_image_version_in_use(image, name).await?;
+            }
+
+            if in_use {
+                eprintln!("› Keeping image version {name}: MicroVMs still reference it");
                 continue;
             }
-            self.delete_image_version(image, version.image_version())
-                .await?;
+
+            self.delete_image_version(image, name).await?;
         }
         Ok(())
     }

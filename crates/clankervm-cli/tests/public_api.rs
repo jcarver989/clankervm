@@ -935,75 +935,43 @@ fn run_uses_project_defaults_and_forwards_client_token() {
 
 #[test]
 fn push_prunes_every_page_of_old_versions_before_publishing() {
-    let directory = TempDir::new().unwrap();
-    write_config(directory.path(), PRUNING_CONFIG);
-    let fake = FakeAws::start(vec![
+    let requests = PruningPush::new(vec![
         Response::ok(VERSIONS_PAGE_ACTIVE),
         Response::ok(VERSIONS_PAGE_DELETED),
+        Response::ok(MICROVMS_NONE),
         Response::ok("{}"),
-        Response::ok("{}"),
-        Response::ok(IMAGE_CREATED),
-        Response::ok(IMAGE_UPDATING),
-        Response::ok(IMAGE_UPDATED),
-        Response::ok(VERSION_3_ACTIVE),
-    ]);
+    ])
+    .succeeds();
 
-    let result = run_json(
-        directory.path(),
-        &["--format", "json", "push", "--timeout", "5s"],
-        &fake.url(),
-    );
-
-    assert_eq!(result["release"], "demo@3");
-    let requests = fake.finish();
-    assert_eq!(requests.len(), 8, "{requests:#?}");
+    assert_eq!(requests.len(), 9, "{requests:#?}");
     assert!(requests[0].contains("maxResults=50"), "{}", requests[0]);
     assert!(
         requests[1].contains("nextToken=versions-2"),
         "{}",
         requests[1]
     );
-    assert!(requests[2].starts_with("DELETE "), "{}", requests[2]);
-    let deleted: Vec<&String> = requests
-        .iter()
-        .filter(|request| request.starts_with("DELETE "))
-        .collect();
+    assert!(requests[3].starts_with("DELETE "), "{}", requests[3]);
+    let deleted = sent(&requests, &["DELETE "]);
     assert_eq!(deleted.len(), 1, "{requests:#?}");
     assert!(
         deleted[0].contains("/versions/1"),
-        "the active version and the deleted one are skipped: {}",
+        "the newest launchable version and the deleted one are skipped: {}",
         deleted[0]
     );
 }
 
 #[test]
 fn push_retries_pruning_while_the_image_is_updating() {
-    let directory = TempDir::new().unwrap();
-    write_config(directory.path(), PRUNING_CONFIG);
-    let fake = FakeAws::start(vec![
+    let requests = PruningPush::new(vec![
         Response::ok(VERSIONS_PAGE_ACTIVE),
         Response::ok(VERSIONS_PAGE_DELETED),
+        Response::ok(MICROVMS_NONE),
         Response::image_updating(),
         Response::ok("{}"),
-        Response::ok("{}"),
-        Response::ok(IMAGE_CREATED),
-        Response::ok(IMAGE_UPDATING),
-        Response::ok(IMAGE_UPDATED),
-        Response::ok(VERSION_3_ACTIVE),
-    ]);
+    ])
+    .succeeds();
 
-    let result = run_json(
-        directory.path(),
-        &["--format", "json", "push", "--timeout", "5s"],
-        &fake.url(),
-    );
-
-    assert_eq!(result["release"], "demo@3");
-    let requests = fake.finish();
-    let deleted: Vec<&String> = requests
-        .iter()
-        .filter(|request| request.starts_with("DELETE "))
-        .collect();
+    let deleted = sent(&requests, &["DELETE "]);
     assert_eq!(deleted.len(), 2, "{requests:#?}");
     assert!(
         deleted
@@ -1011,6 +979,253 @@ fn push_retries_pruning_while_the_image_is_updating() {
             .all(|request| request.contains("/versions/1")),
         "{deleted:#?}"
     );
+}
+
+struct PruningPush {
+    max: usize,
+    responses: Vec<Response>,
+}
+
+impl PruningPush {
+    fn new(responses: Vec<Response>) -> Self {
+        Self { max: 1, responses }
+    }
+
+    fn max(mut self, max: usize) -> Self {
+        self.max = max;
+        self
+    }
+
+    fn succeeds(mut self) -> Vec<String> {
+        self.responses.extend([
+            Response::ok("{}"),
+            Response::ok(IMAGE_CREATED),
+            Response::ok(IMAGE_UPDATING),
+            Response::ok(IMAGE_UPDATED),
+            Response::ok(VERSION_3_ACTIVE),
+        ]);
+        let (output, fake) = self.run();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["release"], "demo@3");
+        fake.finish()
+    }
+
+    fn fails(self, error: &str) -> Vec<String> {
+        let (output, fake) = self.run();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(stderr.contains(error), "expected {error:?} in {stderr}");
+        fake.finish()
+    }
+
+    fn run(self) -> (Output, FakeAws) {
+        let directory = TempDir::new().unwrap();
+        write_config(
+            directory.path(),
+            &PRUNING_CONFIG.replace("max = 1", &format!("max = {}", self.max)),
+        );
+        let fake = FakeAws::start(self.responses);
+        let output = run_cli(
+            directory.path(),
+            &["--format", "json", "push", "--timeout", "5s"],
+            &fake.url(),
+        );
+        (output, fake)
+    }
+}
+
+fn sent<'a>(requests: &'a [String], methods: &[&str]) -> Vec<&'a String> {
+    requests
+        .iter()
+        .filter(|request| methods.iter().any(|method| request.starts_with(method)))
+        .collect()
+}
+
+fn pruning_versions(old_state: &str, old_status: &str) -> Response {
+    let mut page: Value = serde_json::from_str(VERSIONS_PAGE_ACTIVE).unwrap();
+    page.as_object_mut().unwrap().remove("nextToken");
+    page["items"][1]["state"] = old_state.into();
+    page["items"][1]["status"] = old_status.into();
+    Response::ok(page.to_string())
+}
+
+fn pruning_microvms(state: &str, next_token: Option<&str>) -> Response {
+    let mut page: Value = serde_json::from_str(MICROVMS_PAGE_TERMINATED).unwrap();
+    page["items"][0]["imageVersion"] = "1".into();
+    page["items"][0]["state"] = state.into();
+    if let Some(token) = next_token {
+        page["nextToken"] = token.into();
+    }
+    Response::ok(page.to_string())
+}
+
+fn pruning_deactivated() -> Response {
+    let mut version: Value = serde_json::from_str(VERSION_ACTIVE).unwrap();
+    version["imageVersion"] = "1".into();
+    version["status"] = "INACTIVE".into();
+    Response::ok(version.to_string())
+}
+
+#[test]
+fn push_deactivates_and_prunes_old_active_versions_with_only_terminated_instances() {
+    let requests = PruningPush::new(vec![
+        pruning_versions("SUCCESSFUL", "ACTIVE"),
+        pruning_microvms("TERMINATED", None),
+        pruning_deactivated(),
+        pruning_microvms("TERMINATED", None),
+        Response::ok("{}"),
+    ])
+    .succeeds();
+    assert!(requests[1].contains("imageVersion=1"), "{requests:#?}");
+    assert!(requests[1].contains("imageIdentifier="), "{requests:#?}");
+    assert!(requests[2].starts_with("PATCH "), "{requests:#?}");
+    assert!(requests[2].contains("/versions/1"), "{requests:#?}");
+    assert!(
+        requests[2].contains(r#""status":"INACTIVE""#),
+        "{requests:#?}"
+    );
+    assert!(requests[3].contains("imageVersion=1"), "{requests:#?}");
+    assert!(requests[4].starts_with("DELETE "), "{requests:#?}");
+    assert!(requests[4].contains("/versions/1"), "{requests:#?}");
+}
+
+#[test]
+fn push_preserves_versions_referenced_by_every_non_terminated_state() {
+    for state in [
+        "PENDING",
+        "RUNNING",
+        "SUSPENDED",
+        "SUSPENDING",
+        "TERMINATING",
+        "RESUMING",
+        "FUTURE_STATE",
+    ] {
+        let requests = PruningPush::new(vec![
+            pruning_versions("SUCCESSFUL", "ACTIVE"),
+            pruning_microvms("TERMINATED", Some("instances-2")),
+            pruning_microvms(state, None),
+        ])
+        .succeeds();
+        assert!(
+            requests[2].contains("nextToken=instances-2"),
+            "{requests:#?}"
+        );
+        assert!(
+            sent(&requests, &["DELETE ", "PATCH "]).is_empty(),
+            "{state}: {requests:#?}"
+        );
+    }
+}
+
+#[test]
+fn push_rechecks_all_instance_pages_after_deactivation_and_preserves_a_late_launch() {
+    let requests = PruningPush::new(vec![
+        pruning_versions("SUCCESSFUL", "ACTIVE"),
+        Response::ok(MICROVMS_NONE),
+        pruning_deactivated(),
+        pruning_microvms("TERMINATED", Some("instances-2")),
+        pruning_microvms("PENDING", None),
+    ])
+    .succeeds();
+    assert!(requests[2].starts_with("PATCH "), "{requests:#?}");
+    assert!(
+        requests[4].contains("nextToken=instances-2"),
+        "{requests:#?}"
+    );
+    assert!(sent(&requests, &["DELETE "]).is_empty(), "{requests:#?}");
+}
+
+#[test]
+fn push_does_not_prune_versions_still_building_or_in_unknown_states() {
+    for (state, status) in [
+        ("PENDING", "INACTIVE"),
+        ("IN_PROGRESS", "INACTIVE"),
+        ("FUTURE_STATE", "INACTIVE"),
+        ("DELETING", "INACTIVE"),
+        ("DELETED", "INACTIVE"),
+        ("SUCCESSFUL", "FUTURE_STATUS"),
+    ] {
+        let requests = PruningPush::new(vec![pruning_versions(state, status)]).succeeds();
+        assert!(
+            sent(&requests, &["DELETE ", "PATCH "]).is_empty(),
+            "{state}/{status}: {requests:#?}"
+        );
+    }
+}
+
+#[test]
+fn push_keeps_successful_rollback_versions_even_when_a_newer_build_failed() {
+    let mut page: Value = serde_json::from_str(VERSIONS_PAGE_ACTIVE).unwrap();
+    page.as_object_mut().unwrap().remove("nextToken");
+    let mut failed = page["items"][0].clone();
+    failed["imageVersion"] = "3".into();
+    failed["state"] = "FAILED".into();
+    failed["status"] = "INACTIVE".into();
+    failed["createdAt"] = 1_787_616_100.into();
+    page["items"][1]["status"] = "ACTIVE".into();
+    page["items"].as_array_mut().unwrap().push(failed);
+
+    let requests = PruningPush::new(vec![
+        Response::ok(page.to_string()),
+        Response::ok(MICROVMS_NONE),
+        Response::ok("{}"),
+    ])
+    .max(3)
+    .succeeds();
+
+    let deleted = sent(&requests, &["DELETE "]);
+    assert_eq!(deleted.len(), 1, "{requests:#?}");
+    assert!(deleted[0].contains("/versions/3"), "{requests:#?}");
+    assert!(sent(&requests, &["PATCH "]).is_empty(), "{requests:#?}");
+}
+
+#[test]
+fn push_pruning_fails_closed_on_reference_check_or_deactivation_errors() {
+    for (responses, error) in [
+        (
+            vec![
+                pruning_versions("SUCCESSFUL", "ACTIVE"),
+                Response::access_denied(),
+            ],
+            "list MicroVMs before pruning failed",
+        ),
+        (
+            vec![
+                pruning_versions("SUCCESSFUL", "ACTIVE"),
+                Response::ok(MICROVMS_NONE),
+                Response::access_denied(),
+            ],
+            "deactivate image version failed",
+        ),
+        (
+            vec![
+                pruning_versions("SUCCESSFUL", "ACTIVE"),
+                Response::ok(MICROVMS_NONE),
+                pruning_deactivated(),
+                Response::access_denied(),
+            ],
+            "list MicroVMs before pruning failed",
+        ),
+        (
+            vec![
+                pruning_versions("SUCCESSFUL", "ACTIVE"),
+                Response::ok(MICROVMS_NONE),
+                Response::ok(VERSION_ACTIVE),
+            ],
+            "version 1 is not INACTIVE",
+        ),
+    ] {
+        let requests = PruningPush::new(responses).fails(error);
+        assert!(
+            sent(&requests, &["DELETE ", "POST "]).is_empty(),
+            "{requests:#?}"
+        );
+    }
 }
 
 #[test]

@@ -221,7 +221,7 @@ async fn push<T: MicroVmClient, U: FnMut(&ReleaseStatus)>(
     let mut retries_left = settings.build_retries();
     loop {
         if let Some(max) = settings.keep_versions {
-            client.prune(&spec.arn, max - 1).await?;
+            client.prune(&spec.arn, (max - 1).max(1)).await?;
         }
         let published = client.publish(&spec, &bundle).await?;
         let release = Release::new(&spec.name, spec.arn.clone(), &published.version)
@@ -336,8 +336,8 @@ mod tests {
             "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
         );
         assert_eq!(
-            *keep, 0,
-            "one below the maximum leaves room for the new version"
+            *keep, 1,
+            "max = 1 still keeps a launchable fallback for the new version"
         );
         Ok(())
     }
@@ -436,10 +436,10 @@ mod tests {
         assert_eq!(result.release, "demo@2");
         let calls = client.calls();
         let [
-            Call::Prune(_, 0),
+            Call::Prune(_, 1),
             Call::Publish(_),
             Call::Observe(_, Some(first)),
-            Call::Prune(_, 0),
+            Call::Prune(_, 1),
             Call::Publish(_),
             Call::Observe(_, Some(second)),
         ] = calls.as_slice()
