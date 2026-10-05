@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.8...clankervm-v0.1.9) - 2026-10-05
+
+### Added
+
+- *(cli)* add standalone image version pruning ([#19](https://github.com/jcarver989/clankervm/pull/19))
+
 ## [0.1.8](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.7...clankervm-v0.1.8) - 2026-10-05
 
 ### Fixed
