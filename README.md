@@ -74,6 +74,10 @@ clankervm shell MICROVM_ID
 clankervm shell --keep
 # Press Ctrl-] to detach.
 
+# List and launch the project's MicroVMs for apps that open terminals and agents on them
+clankervm remote list
+clankervm remote launch
+
 # Read logs
 clankervm logs MICROVM_ID
 clankervm logs MICROVM_ID --follow

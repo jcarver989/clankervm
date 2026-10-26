@@ -18,7 +18,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub use client::MicroVmClientError;
-pub use commands::{Command, execute};
+pub use commands::{Command, RemoteCommand, execute};
 pub use shell::ShellError;
 
 #[derive(Debug, Parser)]

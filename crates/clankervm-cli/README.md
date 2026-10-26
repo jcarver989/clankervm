@@ -288,6 +288,47 @@ on top of the configured ones and is terminated when the session ends unless
 `--keep` is set. Attaching is interactive-only and cannot be combined with
 `--format json`.
 
+## Use from apps
+
+Apps that open terminals and agents on remote machines, such as J Terminal and
+the Aether desktop app, define each remote by the commands that list, launch,
+change and reach its instances. `remote` prints what they read, whatever
+`--format` says:
+
+```sh
+# The project's MicroVMs that have not been terminated
+clankervm remote list
+# {"instances":[{"id":"microvm-0099","state":"running","expires_at":"2026-08-25T01:00:00Z"}]}
+
+# Launch a MicroVM as `run` would, and print its id
+clankervm remote launch
+```
+
+A state is one of `starting`, `running`, `suspending`, `suspended` or
+`stopping`, and `expires_at` is when the MicroVM reaches the project's
+`max-duration`. Everything else the apps do runs the other commands as they
+are, for example in `~/.config/clanker/remotes.json`:
+
+```json
+{
+  "remotes": [
+    {
+      "name": "patchwave",
+      "dir": "~/code/patchwave/clankers",
+      "workspace": "~/code/patchwave",
+      "list":    ["clankervm", "remote", "list"],
+      "launch":  ["clankervm", "remote", "launch"],
+      "suspend": ["clankervm", "suspend", "${ID}", "--wait"],
+      "resume":  ["clankervm", "resume", "${ID}", "--wait"],
+      "stop":    ["clankervm", "stop", "${ID}", "--wait"],
+      "shell":   ["clankervm", "shell", "${ID}"],
+      "logs":    ["clankervm", "logs", "${ID}", "--follow"],
+      "acp":     { "websocket": ["clankervm", "--format", "json", "connect", "${ID}", "aether", "--print-endpoint"] }
+    }
+  ]
+}
+```
+
 ## Read logs
 
 ```sh

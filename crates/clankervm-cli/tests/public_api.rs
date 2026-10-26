@@ -1,6 +1,6 @@
 mod support;
 
-use clankervm::{Cli, Command as ClankerCommand};
+use clankervm::{Cli, Command as ClankerCommand, RemoteCommand};
 use clap::Parser;
 use serde_json::{Value, json};
 use std::fs;
@@ -662,6 +662,40 @@ fn list_forwards_the_image_filters() {
     let request = fake.finish().pop().unwrap();
     assert!(request.contains("imageIdentifier=demo"), "{request}");
     assert!(request.contains("imageVersion=7"), "{request}");
+}
+
+#[test]
+fn remote_list_prints_the_projects_instances_for_apps() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+    let fake = FakeAws::start(vec![
+        Response::ok(MICROVMS_PAGE_RUNNING),
+        Response::ok(MICROVMS_PAGE_TERMINATED),
+    ]);
+
+    let result = run_json(directory.path(), &["remote", "list"], &fake.url());
+
+    assert_eq!(
+        result,
+        serde_json::json!({"instances": [
+            {"id": "microvm-1", "state": "running", "expires_at": "2026-08-25T01:00:00Z"},
+        ]})
+    );
+    fake.finish();
+}
+
+#[test]
+fn remote_launch_takes_the_options_of_run() {
+    let ClankerCommand::Remote(remote) =
+        parse(&["remote", "launch", "--release", "demo@7", "--", "./job"])
+    else {
+        panic!("expected remote command");
+    };
+    let RemoteCommand::Launch(launch) = remote.command else {
+        panic!("expected remote launch");
+    };
+    assert_eq!(launch.release.as_deref(), Some("demo@7"));
+    assert_eq!(launch.arguments, ["./job"]);
 }
 
 #[test]

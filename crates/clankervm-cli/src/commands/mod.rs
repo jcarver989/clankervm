@@ -6,6 +6,7 @@ mod list;
 mod logs;
 mod prune;
 mod push;
+mod remote;
 mod run;
 mod shell;
 mod status;
@@ -29,6 +30,7 @@ pub use prune::PruneOptions;
 pub(crate) use prune::PruneSettings;
 pub use push::PushOptions;
 pub(crate) use push::PushSettings;
+pub use remote::{RemoteCommand, RemoteOptions};
 pub use run::RunOptions;
 pub(crate) use run::RunSettings;
 pub use shell::ShellOptions;
@@ -68,6 +70,8 @@ pub enum Command {
     Logs(LogsOptions),
     /// Attach a terminal to a MicroVM's pty, launching one if needed.
     Shell(ShellOptions),
+    /// List and launch the project's MicroVMs for apps that open terminals and agents on them.
+    Remote(RemoteOptions),
 }
 
 async fn create_sdk_config(config: &ProjectConfig) -> Result<SdkConfig, ClankerError> {
@@ -147,6 +151,7 @@ pub async fn execute(cli: Cli) -> Result<(), ClankerError> {
         Command::Stop(options) => lifecycle::stop(options, cli.format, &client).await,
         Command::Logs(options) => logs::execute(&options, &config, cli.format, &client).await,
         Command::Shell(options) => Box::pin(shell::execute(&options, &config, &client)).await,
+        Command::Remote(options) => remote::execute(options, &config, &client).await,
         Command::Init(_) => unreachable!("init returns before project setup"),
     }
 }
