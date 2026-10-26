@@ -55,12 +55,12 @@ pub(crate) struct SelectedConnection {
     pub executable: PathBuf,
 }
 
-pub(crate) fn select(
+/// The settings of the connection `name`, with its timeout replaced by `timeout` if given.
+pub(crate) fn connection_settings(
     config: &ProjectConfig,
     name: &str,
     timeout: Option<Duration>,
-    format: OutputFormat,
-) -> Result<SelectedConnection, ClankerError> {
+) -> Result<ConnectionSettings, ClankerError> {
     let mut settings = config
         .connections
         .get(name)
@@ -69,6 +69,16 @@ pub(crate) fn select(
     if let Some(timeout) = timeout {
         settings.timeout = timeout;
     }
+    Ok(settings)
+}
+
+pub(crate) fn select(
+    config: &ProjectConfig,
+    name: &str,
+    timeout: Option<Duration>,
+    format: OutputFormat,
+) -> Result<SelectedConnection, ClankerError> {
+    let settings = connection_settings(config, name, timeout)?;
     if matches!(format, OutputFormat::Json) {
         return Err(ClankerError::InvalidConfig(
             "a connection with a local client cannot use --format json".into(),

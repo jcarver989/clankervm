@@ -185,6 +185,43 @@ fn shell_rejects_json_before_project_or_credential_setup() {
 }
 
 #[test]
+fn connect_prints_the_endpoint_of_an_application_without_running_its_client() {
+    let directory = TempDir::new().unwrap();
+    write_config(
+        directory.path(),
+        "[microvm.run.connect.aether]\nport = 8080\nprotocol = \"websocket\"\npath = \"/acp\"\nclient = [\"./not-installed\", \"{url}\"]\n",
+    );
+    let fake = FakeAws::start(vec![
+        Response::ok(
+            r#"{"microvmId":"vm-1","state":"RUNNING","endpoint":"https://test.lambda-microvm.us-east-1.on.aws","imageArn":"image","imageVersion":"1","executionRoleArn":"role","startedAt":1787616000,"maximumDurationInSeconds":3600,"ingressNetworkConnectors":["arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:HTTP_INGRESS"]}"#,
+        ),
+        Response::ok(r#"{"authToken":{"X-aws-proxy-auth":"token"}}"#),
+    ]);
+
+    let endpoint = run_json(
+        directory.path(),
+        &[
+            "--format",
+            "json",
+            "connect",
+            "vm-1",
+            "aether",
+            "--print-endpoint",
+        ],
+        &fake.url(),
+    );
+
+    assert_eq!(
+        endpoint,
+        json!({
+            "url": "wss://test.lambda-microvm.us-east-1.on.aws/acp",
+            "headers": {"X-aws-proxy-auth": "token", "X-aws-proxy-port": "8080"},
+        })
+    );
+    fake.finish();
+}
+
+#[test]
 fn named_connections_separate_remote_and_local_arguments() {
     let ClankerCommand::Run(options) = parse(&[
         "run",
@@ -217,10 +254,25 @@ fn named_connections_separate_remote_and_local_arguments() {
         panic!("expected connect");
     };
     assert_eq!(options.arguments, ["--session", "a b", "", "x=y"]);
+    assert!(!options.print_endpoint);
+    let ClankerCommand::Connect(options) =
+        parse(&["connect", "vm-1", "aether", "--print-endpoint"])
+    else {
+        panic!("expected connect");
+    };
+    assert!(options.print_endpoint);
     for args in [
         vec!["run", "--connect-timeout", "1s"],
         vec!["run", "--connect", "aether", "--client-token", "replay"],
         vec!["connect", "vm-1"],
+        vec![
+            "connect",
+            "vm-1",
+            "aether",
+            "--print-endpoint",
+            "--",
+            "--session",
+        ],
         vec!["shell", "--connect", "aether"],
         vec!["stop", "vm-1", "--timeout", "0s"],
     ] {

@@ -10,7 +10,7 @@ mod run;
 mod shell;
 mod status;
 
-use crate::application::{failure, select};
+use crate::application::failure;
 use crate::client::AwsMicroVmClient;
 use crate::config::ProjectConfig;
 use crate::{ClankerError, Cli, OutputFormat};
@@ -109,9 +109,7 @@ fn preflight(
 ) -> Result<(), ClankerError> {
     match command {
         Command::Run(options) => options.connection(config, format).map(drop),
-        Command::Connect(options) => {
-            select(config, &options.name, options.connect_timeout, format).map(drop)
-        }
+        Command::Connect(options) => options.check(config, format),
         Command::Prune(options) => options.keep_versions(config).map(drop),
         _ => Ok(()),
     }

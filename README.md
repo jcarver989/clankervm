@@ -64,6 +64,10 @@ clankervm --format json list --all
 clankervm run -- /path/to/program ARG...
 clankervm run --release NAME@VERSION -- ./job
 
+# Connect to a named application, or print where it is
+clankervm connect MICROVM_ID NAME
+clankervm --format json connect MICROVM_ID NAME --print-endpoint
+
 # Attach an interactive shell
 clankervm shell
 clankervm shell MICROVM_ID

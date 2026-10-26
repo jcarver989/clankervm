@@ -232,6 +232,39 @@ clankervm run \
   -- ./job
 ```
 
+## Connect to an application
+
+A `[microvm.run.connect.NAME]` table names an application a MicroVM serves and
+the local client that talks to it:
+
+```toml
+[microvm.run.connect.aether]
+port = 8080
+protocol = "websocket"
+path = "/"
+timeout = "5m"
+client = ["aether", "client", "{url}", "-H", "{auth-header}", "-H", "{port-header}"]
+```
+
+```sh
+# Run the local client against a running MicroVM, retrying with fresh tokens
+clankervm connect microvm-0099 aether
+
+# Print the application's URL and headers, for a client that connects itself
+clankervm --format json connect microvm-0099 aether --print-endpoint
+```
+
+`--print-endpoint` waits up to the connection's `timeout` for the MicroVM to
+run, creates an auth token for the connection's port, and prints where to
+connect instead of running the client:
+
+```json
+{"url":"wss://abc123.lambda-microvm.us-east-1.on.aws/","headers":{"X-aws-proxy-auth":"...","X-aws-proxy-port":"8080"}}
+```
+
+Send every header with the request. The token lasts an hour, so fetch a new
+endpoint for each connection.
+
 ## Attach a shell
 
 Run `shell` from an interactive terminal:
