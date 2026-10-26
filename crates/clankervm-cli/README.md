@@ -85,6 +85,7 @@ since = "30m"
 limit = 1000
 ```
 
+- `microvm.run.network.ingress` takes one connector or a list, e.g. `["HTTP_INGRESS", "SHELL_INGRESS"]` to serve an application and expose the pty from the same MicroVM. `ALL_INGRESS` cannot be combined with other connectors: AWS launches such a MicroVM but refuses every token for it.
 - Only `aws.region` and `microvm.name` are required to load a project.
 - Command-line settings override TOML settings, e.g. `--artifact-bucket` overrides `microvm.image.artifact.s3-bucket`.
 - Artifact sources are resolved relative to the project file, defaulting to `.`.
@@ -217,7 +218,8 @@ clankervm run --env LOG_LEVEL=debug --env DRY_RUN=false -- ./job
 ```
 
 Use `microvm.run.command` when a command should be the default. A command after `--`
-overrides it. Environment entries use `KEY=VALUE`.
+overrides it. Environment entries use `KEY=VALUE`. A MicroVM with the `SHELL_INGRESS`
+connector and no command runs `sleep infinity`, so it stays up for its shell.
 
 Useful run options:
 
@@ -225,7 +227,7 @@ Useful run options:
 clankervm run \
   --execution-role-arn "$EXECUTION_ROLE_ARN" \
   --max-duration 3600 \
-  --ingress NO_INGRESS \
+  --ingress HTTP_INGRESS --ingress SHELL_INGRESS \
   --egress INTERNET_EGRESS \
   -- ./job
 ```
@@ -248,9 +250,10 @@ clankervm shell --keep
 clankervm shell -- htop
 ```
 
-Press `Ctrl-]` to detach. A launched MicroVM uses the `SHELL_INGRESS`
-connector and is terminated when the session ends unless `--keep` is set.
-`shell` is interactive-only and cannot be combined with `--format json`.
+Press `Ctrl-]` to detach. A launched MicroVM gets the `SHELL_INGRESS` connector
+on top of the configured ones and is terminated when the session ends unless
+`--keep` is set. Attaching is interactive-only and cannot be combined with
+`--format json`.
 
 ## Read logs
 

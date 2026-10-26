@@ -113,6 +113,20 @@ fn shell_attaches_or_launches() {
     assert_eq!(shell.timeout, std::time::Duration::from_secs(30));
     assert_eq!(shell.run.arguments, ["sleep", "infinity"]);
 
+    let ClankerCommand::Shell(shell) = parse(&[
+        "shell",
+        "--ingress",
+        "HTTP_INGRESS",
+        "--ingress",
+        "SHELL_INGRESS",
+    ]) else {
+        panic!("expected shell command");
+    };
+    assert_eq!(
+        shell.run.settings.ingress.as_deref(),
+        Some(&["HTTP_INGRESS".to_owned(), "SHELL_INGRESS".to_owned()][..])
+    );
+
     // Attaching to an existing MicroVM leaves nothing to launch.
     for rejected in [
         ["shell", "microvm-1", "--keep"].as_slice(),

@@ -1,7 +1,7 @@
 use super::connect;
 use crate::application::{SelectedConnection, select};
 use crate::arn::Arn;
-use crate::client::{LaunchSpec, MicroVmClient};
+use crate::client::{LaunchSpec, MicroVmClient, SHELL_INGRESS};
 use crate::config::{ProjectConfig, Settings};
 use crate::output::render;
 use crate::payload::build_run_payload;
@@ -12,9 +12,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-const DEFAULT_INGRESS: &str = "NO_INGRESS";
+/// The ingress connector that turns inbound traffic off.
+pub(super) const NO_INGRESS: &str = "NO_INGRESS";
+/// The ingress connector for every kind of inbound traffic, which AWS accepts at launch alongside
+/// others but then refuses every token for.
+pub(super) const ALL_INGRESS: &str = "ALL_INGRESS";
+/// The ingress connector for HTTP traffic alone, which can join `SHELL_INGRESS`.
+pub(super) const HTTP_INGRESS: &str = "HTTP_INGRESS";
 const DEFAULT_RUN_EGRESS: &str = "INTERNET_EGRESS";
 const DEFAULT_MAX_DURATION: i32 = 3600;
+/// What a MicroVM with a shell runs when nothing else is asked of it: enough to
+/// keep it alive for the shell.
+const KEEP_ALIVE: [&str; 2] = ["sleep", "infinity"];
 
 #[derive(Clone, Debug, Default, Args)]
 pub struct LaunchOptions {
@@ -61,8 +70,9 @@ pub struct RunSettings {
     pub command: Option<Vec<String>>,
     #[arg(long)]
     pub execution_role_arn: Option<String>,
+    /// Ingress connector; repeatable.
     #[arg(long)]
-    pub ingress: Option<String>,
+    pub ingress: Option<Vec<String>>,
     #[arg(long)]
     pub egress: Option<String>,
     #[arg(long)]
@@ -79,7 +89,26 @@ impl Settings for RunSettings {
             self.command(&[])?;
         }
         validate_non_empty(self.execution_role_arn.as_deref(), "microvm.run.iam-role")?;
-        validate_non_empty(self.ingress.as_deref(), "microvm.run.network.ingress")?;
+        if self.ingress.as_ref().is_some_and(Vec::is_empty) {
+            return Err(ClankerError::InvalidConfig(
+                "microvm.run.network.ingress must name at least one connector".into(),
+            ));
+        }
+        for connector in self.ingress.iter().flatten() {
+            validate_non_empty(Some(connector), "microvm.run.network.ingress")?;
+        }
+        let connectors = self.ingress.as_deref().unwrap_or_default();
+        if connectors.len() > 1
+            && connectors
+                .iter()
+                .any(|connector| connector.ends_with(ALL_INGRESS))
+        {
+            return Err(ClankerError::InvalidConfig(format!(
+                "microvm.run.network.ingress cannot combine {ALL_INGRESS} with other connectors: \
+                 AWS launches the MicroVM but refuses every token for it; use {HTTP_INGRESS} \
+                 and/or SHELL_INGRESS instead"
+            )));
+        }
         validate_non_empty(self.egress.as_deref(), "microvm.run.network.egress")?;
         validate_non_empty(self.log_group.as_deref(), "microvm.run.logs.group")?;
         self.environment()?;
@@ -124,8 +153,11 @@ impl RunSettings {
         Ok((executable, arguments))
     }
 
-    pub(crate) fn ingress(&self) -> &str {
-        self.ingress.as_deref().unwrap_or(DEFAULT_INGRESS)
+    pub(crate) fn ingress(&self) -> Vec<&str> {
+        self.ingress.as_ref().map_or_else(
+            || vec![NO_INGRESS],
+            |connectors| connectors.iter().map(String::as_str).collect(),
+        )
     }
     pub(crate) fn egress(&self) -> &str {
         self.egress.as_deref().unwrap_or(DEFAULT_RUN_EGRESS)
@@ -200,13 +232,26 @@ pub(crate) fn plan_launch(
     let settings = config.run.merge(&cli.settings)?;
     let execution_role_arn = Arn::parse(settings.execution_role_arn()?)?;
     let target = config.target(cli.release.as_deref(), config.account_role(&settings)?)?;
-    let (command, arguments) = settings.command(&cli.arguments)?;
+    let keep_alive: Vec<String> = KEEP_ALIVE.iter().map(|word| (*word).to_owned()).collect();
+    let shell_only = cli.arguments.is_empty()
+        && settings.command.is_none()
+        && settings.ingress().contains(&SHELL_INGRESS);
+    let (command, arguments) = settings.command(if shell_only {
+        &keep_alive
+    } else {
+        &cli.arguments
+    })?;
     let payload = build_run_payload(command, arguments, settings.environment()?, &target.region)?;
+    let ingress_network_connectors = settings
+        .ingress()
+        .into_iter()
+        .map(|connector| Arn::network_connector(&target.region, connector))
+        .collect::<Result<_, _>>()?;
     let spec = LaunchSpec {
         image_arn: target.arn,
         image_version: target.version,
         execution_role_arn,
-        ingress_network_connector: Arn::network_connector(&target.region, settings.ingress())?,
+        ingress_network_connectors,
         egress_network_connector: Arn::network_connector(&target.region, settings.egress())?,
         run_hook_payload: payload,
         maximum_duration_seconds: settings.max_duration(),
@@ -241,6 +286,14 @@ mod tests {
         spec.clone()
     }
 
+    /// The names of the ingress connectors one launch asked for.
+    fn connectors(spec: &LaunchSpec) -> Vec<&str> {
+        spec.ingress_network_connectors
+            .iter()
+            .map(|arn| arn.as_str().rsplit(':').next().unwrap())
+            .collect()
+    }
+
     #[test]
     fn empty_run_values_are_rejected() {
         for settings in [
@@ -249,7 +302,15 @@ mod tests {
                 ..RunSettings::default()
             },
             RunSettings {
-                ingress: Some(" ".into()),
+                ingress: Some(vec![" ".into()]),
+                ..RunSettings::default()
+            },
+            RunSettings {
+                ingress: Some(Vec::new()),
+                ..RunSettings::default()
+            },
+            RunSettings {
+                ingress: Some(vec!["ALL_INGRESS".into(), "SHELL_INGRESS".into()]),
                 ..RunSettings::default()
             },
             RunSettings {
@@ -318,11 +379,7 @@ mod tests {
             "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
         );
         assert_eq!(spec.image_version, None);
-        assert!(
-            spec.ingress_network_connector
-                .as_str()
-                .ends_with("NO_INGRESS")
-        );
+        assert_eq!(connectors(&spec), ["NO_INGRESS"]);
         assert!(
             spec.egress_network_connector
                 .as_str()
@@ -363,7 +420,7 @@ mod tests {
             release: Some("demo@7".into()),
             client_token: Some("run-42".into()),
             settings: RunSettings {
-                ingress: Some("PUBLIC_INGRESS".into()),
+                ingress: Some(vec!["HTTP_INGRESS".into(), "SHELL_INGRESS".into()]),
                 max_duration: Some(60),
                 ..RunSettings::default()
             },
@@ -373,11 +430,7 @@ mod tests {
 
         let spec = launched(&client.calls());
         assert_eq!(spec.image_version.as_deref(), Some("7"));
-        assert!(
-            spec.ingress_network_connector
-                .as_str()
-                .ends_with("PUBLIC_INGRESS")
-        );
+        assert_eq!(connectors(&spec), ["HTTP_INGRESS", "SHELL_INGRESS"]);
         assert_eq!(spec.maximum_duration_seconds, 60);
         assert_eq!(spec.client_token.as_deref(), Some("run-42"));
         let payload: serde_json::Value = serde_json::from_str(&spec.run_hook_payload).unwrap();
@@ -398,6 +451,44 @@ mod tests {
             "{error}"
         );
         assert!(client.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_shell_keeps_a_microvm_without_a_command_alive() {
+        let (_directory, config) = config(&format!(
+            "{ROLE}[microvm.run.network]\ningress = ['HTTP_INGRESS', 'SHELL_INGRESS']\n"
+        ));
+        let client = FakeMicroVmClient::default();
+
+        launch_vm(&LaunchOptions::default(), &config, &client)
+            .await
+            .unwrap();
+
+        let spec = launched(&client.calls());
+        assert_eq!(connectors(&spec), ["HTTP_INGRESS", "SHELL_INGRESS"]);
+        let payload: serde_json::Value = serde_json::from_str(&spec.run_hook_payload).unwrap();
+        assert_eq!(payload["command"], "sleep");
+        assert_eq!(payload["args"], serde_json::json!(["infinity"]));
+    }
+
+    #[tokio::test]
+    async fn a_command_wins_over_the_shell_keep_alive() {
+        let (_directory, config) = config(&format!("{ROLE}command = [\"bash\", \"-l\"]\n"));
+        let client = FakeMicroVmClient::default();
+        let cli = LaunchOptions {
+            settings: RunSettings {
+                ingress: Some(vec!["SHELL_INGRESS".into()]),
+                ..RunSettings::default()
+            },
+            ..LaunchOptions::default()
+        };
+
+        launch_vm(&cli, &config, &client).await.unwrap();
+
+        let spec = launched(&client.calls());
+        let payload: serde_json::Value = serde_json::from_str(&spec.run_hook_payload).unwrap();
+        assert_eq!(payload["command"], "bash");
+        assert_eq!(payload["args"], serde_json::json!(["-l"]));
     }
 
     #[tokio::test]
