@@ -64,11 +64,19 @@ clankervm --format json list --all
 clankervm run -- /path/to/program ARG...
 clankervm run --release NAME@VERSION -- ./job
 
+# Connect to a named application, or print where it is
+clankervm connect MICROVM_ID NAME
+clankervm --format json connect MICROVM_ID NAME --print-endpoint
+
 # Attach an interactive shell
 clankervm shell
 clankervm shell MICROVM_ID
 clankervm shell --keep
 # Press Ctrl-] to detach.
+
+# List and launch the project's MicroVMs for apps that open terminals and agents on them
+clankervm remote list
+clankervm remote launch
 
 # Read logs
 clankervm logs MICROVM_ID

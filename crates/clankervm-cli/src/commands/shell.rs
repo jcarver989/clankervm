@@ -1,7 +1,7 @@
 use super::lifecycle::{terminate, wait_until_running};
-use super::run::{LaunchOptions, plan_launch};
+use super::run::{ALL_INGRESS, HTTP_INGRESS, LaunchOptions, NO_INGRESS, RunSettings, plan_launch};
 use crate::client::{MicroVmClient, MicroVmDetails, SHELL_INGRESS};
-use crate::config::ProjectConfig;
+use crate::config::{ProjectConfig, Settings};
 use crate::shell::{Event, Options, ShellError, attach, connect, events, is_interactive, request};
 use crate::{ClankerError, OutputFormat};
 use clap::Args;
@@ -11,10 +11,6 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::ClientRequestBuilder;
-
-/// What a launched MicroVM runs when nothing else is asked of it: enough to
-/// keep it alive for the shell.
-const KEEP_ALIVE: [&str; 2] = ["sleep", "infinity"];
 
 #[derive(Debug, Args)]
 pub struct ShellOptions {
@@ -99,11 +95,6 @@ where
     U: AsyncRead + AsyncWrite + Unpin,
     V: AsyncWrite + Unpin,
 {
-    if options.run.settings.ingress.is_some() {
-        return Err(ClankerError::InvalidConfig(format!(
-            "`shell` always uses the {SHELL_INGRESS} ingress connector; drop --ingress"
-        )));
-    }
     let launched = options.microvm_id.is_none();
     let microvm_id = match &options.microvm_id {
         Some(microvm_id) => microvm_id.clone(),
@@ -143,17 +134,14 @@ where
 }
 
 /// Launches the MicroVM the session attaches to, exactly as `run` would, with
-/// the connector that exposes its pty and a command that keeps it alive.
+/// the connector that exposes its pty added to the configured ones.
 async fn launch<T: MicroVmClient>(
     options: &ShellOptions,
     config: &ProjectConfig,
     client: &T,
 ) -> Result<String, ClankerError> {
     let mut run = options.run.clone();
-    run.settings.ingress = Some(SHELL_INGRESS.to_owned());
-    if run.arguments.is_empty() && config.run.command.is_none() {
-        run.arguments = KEEP_ALIVE.iter().map(|word| (*word).to_owned()).collect();
-    }
+    run.settings.ingress = Some(shell_ingress(&config.run.merge(&run.settings)?));
     let plan = plan_launch(&run, config)?;
     let launched = client.launch(&plan.spec).await?;
     eprintln!(
@@ -161,6 +149,26 @@ async fn launch<T: MicroVmClient>(
         launched.microvm_id
     );
     Ok(launched.microvm_id)
+}
+
+/// The configured ingress connectors, with the one that exposes the pty added,
+/// the one that turns ingress off dropped, and the one for all traffic narrowed
+/// to HTTP, since AWS refuses tokens when it is combined with any other.
+fn shell_ingress(settings: &RunSettings) -> Vec<String> {
+    let mut connectors = Vec::new();
+    for connector in settings.ingress() {
+        let redundant = connector.ends_with(NO_INGRESS) || connector.ends_with(SHELL_INGRESS);
+        let connector = if connector.ends_with(ALL_INGRESS) {
+            HTTP_INGRESS
+        } else {
+            connector
+        };
+        if !redundant && !connectors.iter().any(|known| known == connector) {
+            connectors.push(connector.to_owned());
+        }
+    }
+    connectors.push(SHELL_INGRESS.to_owned());
+    connectors
 }
 
 /// Waits for the MicroVM to be ready to attach to, checking on the way that it
@@ -271,6 +279,14 @@ mod tests {
             keep: false,
             run: LaunchOptions::default(),
         }
+    }
+
+    /// The names of the ingress connectors one launch asked for.
+    fn connectors(spec: &LaunchSpec) -> Vec<&str> {
+        spec.ingress_network_connectors
+            .iter()
+            .map(|arn| arn.as_str().rsplit(':').next().unwrap())
+            .collect()
     }
 
     /// A remote end that sends AWS's preamble and then exits.
@@ -469,13 +485,7 @@ mod tests {
         assert!(result.launched && result.terminated && !result.detached);
         let calls = client.calls();
         let spec = launched(&calls);
-        assert!(
-            spec.ingress_network_connector
-                .as_str()
-                .ends_with(SHELL_INGRESS),
-            "{}",
-            spec.ingress_network_connector
-        );
+        assert_eq!(connectors(&spec), [SHELL_INGRESS]);
         let payload: serde_json::Value = serde_json::from_str(&spec.run_hook_payload).unwrap();
         assert_eq!(payload["command"], "sleep");
         assert_eq!(payload["args"], serde_json::json!(["infinity"]));
@@ -649,18 +659,38 @@ mod tests {
         assert_eq!(terminated(&client.calls()), 1);
     }
 
-    #[tokio::test]
-    async fn the_shell_connector_cannot_be_overridden() {
+    #[tokio::test(start_paused = true)]
+    async fn the_shell_connector_joins_the_requested_ones() {
         let (_directory, config) = config();
-        let client = FakeMicroVmClient::default();
+        let client = launching();
         let mut options = options(None);
-        options.run.settings.ingress = Some("PUBLIC_INGRESS".into());
+        options.run.settings.ingress = Some(vec![
+            "HTTP_INGRESS".into(),
+            "NO_INGRESS".into(),
+            "HTTP_INGRESS".into(),
+            SHELL_INGRESS.into(),
+        ]);
         let (socket, _remote) = session().await;
 
-        let error = run(&options, &config, &client, socket).await.unwrap_err();
+        run(&options, &config, &client, socket).await.unwrap();
 
-        assert!(matches!(error, ClankerError::InvalidConfig(_)), "{error}");
-        assert!(error.to_string().contains("--ingress"), "{error}");
-        assert!(client.calls().is_empty());
+        let spec = launched(&client.calls());
+        assert_eq!(connectors(&spec), ["HTTP_INGRESS", SHELL_INGRESS]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_shell_connector_narrows_a_configured_all_ingress_to_http() {
+        let directory = TempDir::new().unwrap();
+        let config = project(
+            directory.path(),
+            &format!("[microvm.run]\n{ROLE}\n[microvm.run.network]\ningress = 'ALL_INGRESS'"),
+        );
+        let client = launching();
+        let (socket, _remote) = session().await;
+
+        run(&options(None), &config, &client, socket).await.unwrap();
+
+        let spec = launched(&client.calls());
+        assert_eq!(connectors(&spec), ["HTTP_INGRESS", SHELL_INGRESS]);
     }
 }

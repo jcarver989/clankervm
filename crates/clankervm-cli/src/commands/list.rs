@@ -85,7 +85,7 @@ async fn list<T: MicroVmClient>(
     })
 }
 
-async fn collect<T: MicroVmClient>(
+pub(super) async fn collect<T: MicroVmClient>(
     client: &T,
     image: Option<&ImageIdentifier>,
     version: Option<&str>,

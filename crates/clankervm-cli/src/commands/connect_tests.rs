@@ -96,6 +96,33 @@ async fn signal_exit_retries_until_the_deadline() {
     test.assert_token_calls(2);
 }
 
+#[tokio::test]
+async fn print_endpoint_mints_one_token_and_runs_no_client() {
+    let test = ConnectionTest::new("touch \"$0.ran\"");
+
+    let endpoint = application_endpoint(
+        &test.client,
+        &test.config.connections["web"],
+        "microvm-fake",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        endpoint,
+        ApplicationEndpoint {
+            url: "https://test.lambda-microvm.us-east-1.on.aws/".into(),
+            headers: [
+                ("X-aws-proxy-auth".to_owned(), "fake-token".to_owned()),
+                ("X-aws-proxy-port".to_owned(), "3000".to_owned()),
+            ]
+            .into(),
+        }
+    );
+    test.assert_token_calls(1);
+    assert!(!test.dir.path().join("test-client.ran").exists());
+}
+
 #[tokio::test(start_paused = true)]
 async fn endpoint_wait_handles_delayed_registration_but_not_missing_existing_vms() {
     let client = FakeMicroVmClient::default().described([
@@ -181,6 +208,7 @@ impl ConnectionTest {
             vm_id: "microvm-fake".into(),
             name: "web".into(),
             connect_timeout: None,
+            print_endpoint: false,
             arguments: arguments.to_vec(),
         };
         connect(

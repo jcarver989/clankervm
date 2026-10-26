@@ -143,7 +143,7 @@ pub(crate) struct LaunchSpec {
     pub image_arn: Arn,
     pub image_version: Option<String>,
     pub execution_role_arn: Arn,
-    pub ingress_network_connector: Arn,
+    pub ingress_network_connectors: Vec<Arn>,
     pub egress_network_connector: Arn,
     pub run_hook_payload: String,
     pub maximum_duration_seconds: i32,

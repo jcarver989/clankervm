@@ -6,11 +6,15 @@ use super::lifecycle::wait_until_running;
 use crate::ClankerError;
 use crate::OutputFormat;
 use crate::application::{
-    SelectedConnection, application_url, client_arguments, endpoint, failure, select,
+    SelectedConnection, application_url, client_arguments, connection_settings, endpoint, failure,
+    select,
 };
 use crate::client::{AuthTokenExpiration, MicroVmClient};
-use crate::config::ProjectConfig;
+use crate::config::{ConnectionSettings, ProjectConfig};
+use crate::output::render;
 use clap::Args;
+use serde::Serialize;
+use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -27,8 +31,35 @@ pub struct ConnectOptions {
     pub name: String,
     #[arg(long, value_parser = humantime::parse_duration)]
     pub connect_timeout: Option<Duration>,
+    /// Print the application's URL and headers instead of running its local
+    /// client, for a client that connects itself.
+    #[arg(long, conflicts_with = "arguments")]
+    pub print_endpoint: bool,
     #[arg(last = true, allow_hyphen_values = true)]
     pub arguments: Vec<String>,
+}
+
+/// Where a MicroVM's application is reachable, and the headers that open it.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct ApplicationEndpoint {
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+}
+
+impl ConnectOptions {
+    /// Rejects an unknown connection, or a local client asked for JSON output,
+    /// before credentials are touched.
+    pub(super) fn check(
+        &self,
+        config: &ProjectConfig,
+        format: OutputFormat,
+    ) -> Result<(), ClankerError> {
+        if self.print_endpoint {
+            connection_settings(config, &self.name, self.connect_timeout).map(drop)
+        } else {
+            select(config, &self.name, self.connect_timeout, format).map(drop)
+        }
+    }
 }
 
 pub async fn connect<T: MicroVmClient>(
@@ -37,8 +68,39 @@ pub async fn connect<T: MicroVmClient>(
     format: OutputFormat,
     client: &T,
 ) -> Result<(), ClankerError> {
+    if options.print_endpoint {
+        let settings = connection_settings(config, &options.name, options.connect_timeout)?;
+        let endpoint = application_endpoint(client, &settings, &options.vm_id).await?;
+        return render(format, &endpoint, || human_endpoint(&endpoint));
+    }
     let selected = select(config, &options.name, options.connect_timeout, format)?;
     connect_to_vm(client, &selected, &options.vm_id, false, &options.arguments).await
+}
+
+/// The URL of a running MicroVM's application and the headers that reach it,
+/// with a fresh token, for a client that connects itself.
+pub(crate) async fn application_endpoint<T: MicroVmClient>(
+    client: &T,
+    settings: &ConnectionSettings,
+    id: &str,
+) -> Result<ApplicationEndpoint, ClankerError> {
+    let deadline = Instant::now() + settings.timeout;
+    let base = wait_for_endpoint(client, id, false, deadline).await?;
+    let url = application_url(&base, &settings.path, settings.protocol)?;
+    let port = settings.port.get();
+    let token = timeout_at(
+        deadline,
+        client.create_auth_token(id, port, AUTH_TOKEN_EXPIRATION),
+    )
+    .await
+    .map_err(|_| ClankerError::ApplicationOperationTimeout)??;
+    Ok(ApplicationEndpoint {
+        url: url.to_string(),
+        headers: BTreeMap::from([
+            ("X-aws-proxy-auth".to_owned(), token.value().to_owned()),
+            ("X-aws-proxy-port".to_owned(), port.to_string()),
+        ]),
+    })
 }
 
 pub(crate) async fn connect_to_vm<T: MicroVmClient>(
@@ -96,6 +158,18 @@ pub(crate) async fn connect_to_vm<T: MicroVmClient>(
 
         delay = (delay * 2).min(Duration::from_secs(5));
     }
+}
+
+fn human_endpoint(endpoint: &ApplicationEndpoint) -> String {
+    std::iter::once(endpoint.url.clone())
+        .chain(
+            endpoint
+                .headers
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}")),
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn exit_code(status: ExitStatus) -> u8 {

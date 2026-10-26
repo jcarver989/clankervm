@@ -455,7 +455,12 @@ impl MicroVmClient for AwsMicroVmClient {
             .image_identifier(spec.image_arn.as_str())
             .set_image_version(spec.image_version.clone())
             .execution_role_arn(spec.execution_role_arn.as_str())
-            .ingress_network_connectors(spec.ingress_network_connector.as_str())
+            .set_ingress_network_connectors(Some(
+                spec.ingress_network_connectors
+                    .iter()
+                    .map(|connector| connector.as_str().to_owned())
+                    .collect(),
+            ))
             .egress_network_connectors(spec.egress_network_connector.as_str())
             .run_hook_payload(&spec.run_hook_payload)
             .maximum_duration_in_seconds(spec.maximum_duration_seconds)

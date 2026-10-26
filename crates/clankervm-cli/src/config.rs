@@ -7,7 +7,7 @@ use crate::payload::build_image_hook_payload;
 use crate::util::{parse_key_values, parse_release, validate_non_empty};
 use aws_sdk_lambdamicrovms::types::{HookState, Hooks, MicrovmHooks, MicrovmImageHooks, Resources};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -152,7 +152,8 @@ struct RunConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct RunNetworkConfig {
-    ingress: Option<String>,
+    #[serde(deserialize_with = "one_or_many")]
+    ingress: Option<Vec<String>>,
     egress: Option<String>,
 }
 
@@ -173,6 +174,24 @@ pub struct ConnectionSettings {
     #[serde(default = "connection_timeout", with = "humantime_serde")]
     pub timeout: Duration,
     pub client: Vec<String>,
+}
+
+/// A connector list that may also be written as a single name.
+fn one_or_many<'de, T: Deserializer<'de>>(
+    deserializer: T,
+) -> Result<Option<Vec<String>>, T::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(
+        Option::<OneOrMany>::deserialize(deserializer)?.map(|value| match value {
+            OneOrMany::One(name) => vec![name],
+            OneOrMany::Many(names) => names,
+        }),
+    )
 }
 
 fn connection_path() -> String {
@@ -741,12 +760,36 @@ iam-role = "arn:aws:iam::123456789012:role/run"
             Some(&["LOG_LEVEL=info".to_owned()][..])
         );
         assert_eq!(config.run.max_duration, Some(3600));
-        assert_eq!(config.run.ingress.as_deref(), Some("NO_INGRESS"));
+        assert_eq!(config.run.ingress, Some(vec!["NO_INGRESS".to_owned()]));
         assert_eq!(config.run.egress.as_deref(), Some("INTERNET_EGRESS"));
         assert_eq!(config.run.log_group.as_deref(), Some("/my-runner/microvms"));
         assert_eq!(config.logs.log_group, config.run.log_group);
         assert_eq!(config.logs.since, Some(Duration::from_mins(30)));
         assert_eq!(config.logs.limit, Some(1000));
+    }
+
+    #[test]
+    fn run_ingress_accepts_one_connector_or_a_list() {
+        for (value, expected) in [
+            ("'ALL_INGRESS'", &["ALL_INGRESS"][..]),
+            (
+                "['ALL_INGRESS', 'SHELL_INGRESS']",
+                &["ALL_INGRESS", "SHELL_INGRESS"],
+            ),
+        ] {
+            let text = format!(
+                "[aws]\nregion = 'us-east-1'\n[microvm]\nname = 'demo'\n[microvm.run.network]\ningress = {value}"
+            );
+            let config: ProjectConfig = toml::from_str(&text).unwrap();
+            let ingress: Vec<&str> = config
+                .run
+                .ingress
+                .iter()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(ingress, expected, "{value}");
+        }
     }
 
     #[test]

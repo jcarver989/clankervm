@@ -1,6 +1,6 @@
 mod support;
 
-use clankervm::{Cli, Command as ClankerCommand};
+use clankervm::{Cli, Command as ClankerCommand, RemoteCommand};
 use clap::Parser;
 use serde_json::{Value, json};
 use std::fs;
@@ -113,6 +113,20 @@ fn shell_attaches_or_launches() {
     assert_eq!(shell.timeout, std::time::Duration::from_secs(30));
     assert_eq!(shell.run.arguments, ["sleep", "infinity"]);
 
+    let ClankerCommand::Shell(shell) = parse(&[
+        "shell",
+        "--ingress",
+        "HTTP_INGRESS",
+        "--ingress",
+        "SHELL_INGRESS",
+    ]) else {
+        panic!("expected shell command");
+    };
+    assert_eq!(
+        shell.run.settings.ingress.as_deref(),
+        Some(&["HTTP_INGRESS".to_owned(), "SHELL_INGRESS".to_owned()][..])
+    );
+
     // Attaching to an existing MicroVM leaves nothing to launch.
     for rejected in [
         ["shell", "microvm-1", "--keep"].as_slice(),
@@ -171,6 +185,43 @@ fn shell_rejects_json_before_project_or_credential_setup() {
 }
 
 #[test]
+fn connect_prints_the_endpoint_of_an_application_without_running_its_client() {
+    let directory = TempDir::new().unwrap();
+    write_config(
+        directory.path(),
+        "[microvm.run.connect.aether]\nport = 8080\nprotocol = \"websocket\"\npath = \"/acp\"\nclient = [\"./not-installed\", \"{url}\"]\n",
+    );
+    let fake = FakeAws::start(vec![
+        Response::ok(
+            r#"{"microvmId":"vm-1","state":"RUNNING","endpoint":"https://test.lambda-microvm.us-east-1.on.aws","imageArn":"image","imageVersion":"1","executionRoleArn":"role","startedAt":1787616000,"maximumDurationInSeconds":3600,"ingressNetworkConnectors":["arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:HTTP_INGRESS"]}"#,
+        ),
+        Response::ok(r#"{"authToken":{"X-aws-proxy-auth":"token"}}"#),
+    ]);
+
+    let endpoint = run_json(
+        directory.path(),
+        &[
+            "--format",
+            "json",
+            "connect",
+            "vm-1",
+            "aether",
+            "--print-endpoint",
+        ],
+        &fake.url(),
+    );
+
+    assert_eq!(
+        endpoint,
+        json!({
+            "url": "wss://test.lambda-microvm.us-east-1.on.aws/acp",
+            "headers": {"X-aws-proxy-auth": "token", "X-aws-proxy-port": "8080"},
+        })
+    );
+    fake.finish();
+}
+
+#[test]
 fn named_connections_separate_remote_and_local_arguments() {
     let ClankerCommand::Run(options) = parse(&[
         "run",
@@ -203,10 +254,25 @@ fn named_connections_separate_remote_and_local_arguments() {
         panic!("expected connect");
     };
     assert_eq!(options.arguments, ["--session", "a b", "", "x=y"]);
+    assert!(!options.print_endpoint);
+    let ClankerCommand::Connect(options) =
+        parse(&["connect", "vm-1", "aether", "--print-endpoint"])
+    else {
+        panic!("expected connect");
+    };
+    assert!(options.print_endpoint);
     for args in [
         vec!["run", "--connect-timeout", "1s"],
         vec!["run", "--connect", "aether", "--client-token", "replay"],
         vec!["connect", "vm-1"],
+        vec![
+            "connect",
+            "vm-1",
+            "aether",
+            "--print-endpoint",
+            "--",
+            "--session",
+        ],
         vec!["shell", "--connect", "aether"],
         vec!["stop", "vm-1", "--timeout", "0s"],
     ] {
@@ -596,6 +662,40 @@ fn list_forwards_the_image_filters() {
     let request = fake.finish().pop().unwrap();
     assert!(request.contains("imageIdentifier=demo"), "{request}");
     assert!(request.contains("imageVersion=7"), "{request}");
+}
+
+#[test]
+fn remote_list_prints_the_projects_instances_for_apps() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), "");
+    let fake = FakeAws::start(vec![
+        Response::ok(MICROVMS_PAGE_RUNNING),
+        Response::ok(MICROVMS_PAGE_TERMINATED),
+    ]);
+
+    let result = run_json(directory.path(), &["remote", "list"], &fake.url());
+
+    assert_eq!(
+        result,
+        serde_json::json!({"instances": [
+            {"id": "microvm-1", "state": "running", "expires_at": "2026-08-25T01:00:00Z"},
+        ]})
+    );
+    fake.finish();
+}
+
+#[test]
+fn remote_launch_takes_the_options_of_run() {
+    let ClankerCommand::Remote(remote) =
+        parse(&["remote", "launch", "--release", "demo@7", "--", "./job"])
+    else {
+        panic!("expected remote command");
+    };
+    let RemoteCommand::Launch(launch) = remote.command else {
+        panic!("expected remote launch");
+    };
+    assert_eq!(launch.release.as_deref(), Some("demo@7"));
+    assert_eq!(launch.arguments, ["./job"]);
 }
 
 #[test]

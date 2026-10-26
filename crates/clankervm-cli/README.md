@@ -85,6 +85,7 @@ since = "30m"
 limit = 1000
 ```
 
+- `microvm.run.network.ingress` takes one connector or a list, e.g. `["HTTP_INGRESS", "SHELL_INGRESS"]` to serve an application and expose the pty from the same MicroVM. `ALL_INGRESS` cannot be combined with other connectors: AWS launches such a MicroVM but refuses every token for it.
 - Only `aws.region` and `microvm.name` are required to load a project.
 - Command-line settings override TOML settings, e.g. `--artifact-bucket` overrides `microvm.image.artifact.s3-bucket`.
 - Artifact sources are resolved relative to the project file, defaulting to `.`.
@@ -217,7 +218,8 @@ clankervm run --env LOG_LEVEL=debug --env DRY_RUN=false -- ./job
 ```
 
 Use `microvm.run.command` when a command should be the default. A command after `--`
-overrides it. Environment entries use `KEY=VALUE`.
+overrides it. Environment entries use `KEY=VALUE`. A MicroVM with the `SHELL_INGRESS`
+connector and no command runs `sleep infinity`, so it stays up for its shell.
 
 Useful run options:
 
@@ -225,10 +227,43 @@ Useful run options:
 clankervm run \
   --execution-role-arn "$EXECUTION_ROLE_ARN" \
   --max-duration 3600 \
-  --ingress NO_INGRESS \
+  --ingress HTTP_INGRESS --ingress SHELL_INGRESS \
   --egress INTERNET_EGRESS \
   -- ./job
 ```
+
+## Connect to an application
+
+A `[microvm.run.connect.NAME]` table names an application a MicroVM serves and
+the local client that talks to it:
+
+```toml
+[microvm.run.connect.aether]
+port = 8080
+protocol = "websocket"
+path = "/"
+timeout = "5m"
+client = ["aether", "client", "{url}", "-H", "{auth-header}", "-H", "{port-header}"]
+```
+
+```sh
+# Run the local client against a running MicroVM, retrying with fresh tokens
+clankervm connect microvm-0099 aether
+
+# Print the application's URL and headers, for a client that connects itself
+clankervm --format json connect microvm-0099 aether --print-endpoint
+```
+
+`--print-endpoint` waits up to the connection's `timeout` for the MicroVM to
+run, creates an auth token for the connection's port, and prints where to
+connect instead of running the client:
+
+```json
+{"url":"wss://abc123.lambda-microvm.us-east-1.on.aws/","headers":{"X-aws-proxy-auth":"...","X-aws-proxy-port":"8080"}}
+```
+
+Send every header with the request. The token lasts an hour, so fetch a new
+endpoint for each connection.
 
 ## Attach a shell
 
@@ -248,9 +283,51 @@ clankervm shell --keep
 clankervm shell -- htop
 ```
 
-Press `Ctrl-]` to detach. A launched MicroVM uses the `SHELL_INGRESS`
-connector and is terminated when the session ends unless `--keep` is set.
-`shell` is interactive-only and cannot be combined with `--format json`.
+Press `Ctrl-]` to detach. A launched MicroVM gets the `SHELL_INGRESS` connector
+on top of the configured ones and is terminated when the session ends unless
+`--keep` is set. Attaching is interactive-only and cannot be combined with
+`--format json`.
+
+## Use from apps
+
+Apps that open terminals and agents on remote machines, such as J Terminal and
+the Aether desktop app, define each remote by the commands that list, launch,
+change and reach its instances. `remote` prints what they read, whatever
+`--format` says:
+
+```sh
+# The project's MicroVMs that have not been terminated
+clankervm remote list
+# {"instances":[{"id":"microvm-0099","state":"running","expires_at":"2026-08-25T01:00:00Z"}]}
+
+# Launch a MicroVM as `run` would, and print its id
+clankervm remote launch
+```
+
+A state is one of `starting`, `running`, `suspending`, `suspended` or
+`stopping`, and `expires_at` is when the MicroVM reaches the project's
+`max-duration`. Everything else the apps do runs the other commands as they
+are, for example in `~/.config/clanker/remotes.json`:
+
+```json
+{
+  "remotes": [
+    {
+      "name": "patchwave",
+      "dir": "~/code/patchwave/clankers",
+      "workspace": "~/code/patchwave",
+      "list":    ["clankervm", "remote", "list"],
+      "launch":  ["clankervm", "remote", "launch"],
+      "suspend": ["clankervm", "suspend", "${ID}", "--wait"],
+      "resume":  ["clankervm", "resume", "${ID}", "--wait"],
+      "stop":    ["clankervm", "stop", "${ID}", "--wait"],
+      "shell":   ["clankervm", "shell", "${ID}"],
+      "logs":    ["clankervm", "logs", "${ID}", "--follow"],
+      "acp":     { "websocket": ["clankervm", "--format", "json", "connect", "${ID}", "aether", "--print-endpoint"] }
+    }
+  ]
+}
+```
 
 ## Read logs
 
