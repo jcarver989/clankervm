@@ -7,14 +7,14 @@ use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
 #[derive(Clone, Debug)]
-pub struct Artifact {
+pub(crate) struct Artifact {
     pub bytes: Vec<u8>,
     pub digest: String,
 }
 
 impl Artifact {
     /// Loads an existing ZIP file or creates a deterministic ZIP from a directory.
-    pub fn load(path: &Path) -> io::Result<Self> {
+    pub(crate) fn load(path: &Path) -> io::Result<Self> {
         if path.is_dir() {
             Self::from_directory(path)
         } else {

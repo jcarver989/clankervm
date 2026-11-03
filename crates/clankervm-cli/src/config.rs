@@ -18,7 +18,7 @@ use std::time::Duration;
 /// Project configuration resolved into command settings, before CLI overrides.
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "ProjectFile")]
-pub struct ProjectConfig {
+pub(crate) struct ProjectConfig {
     pub aws: AwsConfig,
     pub name: String,
     pub push: PushSettings,
@@ -35,7 +35,7 @@ pub struct ProjectConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct AwsConfig {
+pub(crate) struct AwsConfig {
     pub region: String,
     #[serde(default, deserialize_with = "env_string")]
     pub profile: Option<String>,
@@ -166,14 +166,14 @@ struct RunNetworkConfig {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Protocol {
+pub(crate) enum Protocol {
     Http,
     Websocket,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct ConnectionSettings {
+pub(crate) struct ConnectionSettings {
     pub port: NonZeroU16,
     pub protocol: Protocol,
     #[serde(default = "connection_path")]

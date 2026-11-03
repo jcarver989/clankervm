@@ -17,17 +17,18 @@ use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
-pub const GRACEFUL_TERM_TRAP: &str = r#"trap 'printf terminated > "$TERMINATED"; exit 0' TERM"#;
-pub const IGNORE_TERM_TRAP: &str = "trap '' TERM";
+pub(crate) const GRACEFUL_TERM_TRAP: &str =
+    r#"trap 'printf terminated > "$TERMINATED"; exit 0' TERM"#;
+pub(crate) const IGNORE_TERM_TRAP: &str = "trap '' TERM";
 
-pub struct TestServerBuilder {
+pub(crate) struct TestServerBuilder {
     terminate_grace_period: Duration,
     ready_payload: Option<Value>,
     validate_payload: Option<Value>,
 }
 
 impl TestServerBuilder {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             terminate_grace_period: Duration::from_millis(100),
             ready_payload: None,
@@ -35,22 +36,22 @@ impl TestServerBuilder {
         }
     }
 
-    pub fn terminate_grace_period(mut self, terminate_grace_period: Duration) -> Self {
+    pub(crate) fn terminate_grace_period(mut self, terminate_grace_period: Duration) -> Self {
         self.terminate_grace_period = terminate_grace_period;
         self
     }
 
-    pub fn ready_command(mut self, payload: Value) -> Self {
+    pub(crate) fn ready_command(mut self, payload: Value) -> Self {
         self.ready_payload = Some(payload);
         self
     }
 
-    pub fn validate_command(mut self, payload: Value) -> Self {
+    pub(crate) fn validate_command(mut self, payload: Value) -> Self {
         self.validate_payload = Some(payload);
         self
     }
 
-    pub async fn start(self) -> TestServer {
+    pub(crate) async fn start(self) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut server = LambdaHookServer::with_terminate_grace_period(self.terminate_grace_period);
@@ -68,7 +69,7 @@ impl TestServerBuilder {
         }
     }
 
-    pub fn start_process(self) -> TestServerProcess {
+    pub(crate) fn start_process(self) -> TestServerProcess {
         let grace_period_seconds = self.terminate_grace_period.as_secs();
         assert_eq!(
             self.terminate_grace_period,
@@ -105,42 +106,42 @@ impl TestServerBuilder {
     }
 }
 
-pub struct TestServer {
+pub(crate) struct TestServer {
     base_url: String,
     client: Client,
     join: JoinHandle<Result<(), HookServerError>>,
 }
 
-pub struct TestResponse {
-    pub status: StatusCode,
-    pub body: Value,
+pub(crate) struct TestResponse {
+    pub(crate) status: StatusCode,
+    pub(crate) body: Value,
 }
 
 impl TestServer {
-    pub async fn post(&self, path: &str) -> TestResponse {
+    pub(crate) async fn post(&self, path: &str) -> TestResponse {
         request(&self.client, &self.base_url, Method::POST, path, None).await
     }
 
-    pub async fn get(&self, path: &str) -> TestResponse {
+    pub(crate) async fn get(&self, path: &str) -> TestResponse {
         request(&self.client, &self.base_url, Method::GET, path, None).await
     }
 
-    pub async fn run(&self, payload: Value) -> TestResponse {
+    pub(crate) async fn run(&self, payload: Value) -> TestResponse {
         self.post_json("/run", run_request(&payload)).await
     }
 
-    pub async fn post_json(&self, path: &str, body: Value) -> TestResponse {
+    pub(crate) async fn post_json(&self, path: &str, body: Value) -> TestResponse {
         request(&self.client, &self.base_url, Method::POST, path, Some(body)).await
     }
 
-    pub async fn wait(self) -> Result<(), HookServerError> {
+    pub(crate) async fn wait(self) -> Result<(), HookServerError> {
         tokio::time::timeout(Duration::from_secs(5), self.join)
             .await
             .expect("server did not stop")
             .unwrap()
     }
 
-    pub async fn wait_until_ready(&self) {
+    pub(crate) async fn wait_until_ready(&self) {
         tokio::time::timeout(Duration::from_secs(5), async {
             while self.post("/ready").await.status != StatusCode::OK {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -151,14 +152,14 @@ impl TestServer {
     }
 }
 
-pub struct TestServerProcess {
+pub(crate) struct TestServerProcess {
     base_url: String,
     client: Client,
     child: Child,
 }
 
 impl TestServerProcess {
-    pub async fn wait_until_ready(&self) {
+    pub(crate) async fn wait_until_ready(&self) {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if self
@@ -177,7 +178,7 @@ impl TestServerProcess {
         .expect("server did not become ready");
     }
 
-    pub async fn run(&self, payload: Value) -> TestResponse {
+    pub(crate) async fn run(&self, payload: Value) -> TestResponse {
         request(
             &self.client,
             &self.base_url,
@@ -188,15 +189,15 @@ impl TestServerProcess {
         .await
     }
 
-    pub async fn post(&self, path: &str) -> TestResponse {
+    pub(crate) async fn post(&self, path: &str) -> TestResponse {
         request(&self.client, &self.base_url, Method::POST, path, None).await
     }
 
-    pub fn pid(&self) -> Pid {
+    pub(crate) fn pid(&self) -> Pid {
         Pid::from_raw(self.child.id().unwrap().cast_signed())
     }
 
-    pub async fn wait_with_output(self) -> Output {
+    pub(crate) async fn wait_with_output(self) -> Output {
         tokio::time::timeout(Duration::from_secs(5), self.child.wait_with_output())
             .await
             .expect("server did not stop")
@@ -221,14 +222,14 @@ async fn request(
     TestResponse { status, body }
 }
 
-pub struct RunScriptBuilder {
+pub(crate) struct RunScriptBuilder {
     name: String,
     trap: String,
     child: String,
 }
 
 impl RunScriptBuilder {
-    pub fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             trap: GRACEFUL_TERM_TRAP.to_string(),
@@ -236,17 +237,17 @@ impl RunScriptBuilder {
         }
     }
 
-    pub fn trap(mut self, trap: &str) -> Self {
+    pub(crate) fn trap(mut self, trap: &str) -> Self {
         self.trap = trap.to_string();
         self
     }
 
-    pub fn child(mut self, child: &str) -> Self {
+    pub(crate) fn child(mut self, child: &str) -> Self {
         self.child = child.to_string();
         self
     }
 
-    pub fn build(self) -> RunScript {
+    pub(crate) fn build(self) -> RunScript {
         let directory = tempfile::tempdir().unwrap();
         let pids = directory.path().join("pids");
         let terminated = directory.path().join("terminated");
@@ -270,7 +271,7 @@ impl RunScriptBuilder {
 
 /// A run command that spawns a background child, records both process IDs,
 /// and waits. Its trap decides how it responds to SIGTERM.
-pub struct RunScript {
+pub(crate) struct RunScript {
     _directory: TempDir,
     executable: PathBuf,
     pids: PathBuf,
@@ -278,30 +279,30 @@ pub struct RunScript {
 }
 
 impl RunScript {
-    pub fn payload(&self) -> Value {
+    pub(crate) fn payload(&self) -> Value {
         json!({
             "command": self.executable,
             "environment": { "PIDS": self.pids, "TERMINATED": self.terminated }
         })
     }
 
-    pub async fn pids(&self) -> (Pid, Pid) {
+    pub(crate) async fn pids(&self) -> (Pid, Pid) {
         read_pids(&self.pids).await
     }
 
-    pub fn was_terminated(&self) -> bool {
+    pub(crate) fn was_terminated(&self) -> bool {
         fs::read_to_string(&self.terminated).is_ok_and(|contents| contents == "terminated")
     }
 }
 
-pub fn run_request(payload: &Value) -> Value {
+pub(crate) fn run_request(payload: &Value) -> Value {
     json!({
         "microvmId": "microvm-123",
         "runHookPayload": serde_json::to_string(payload).unwrap()
     })
 }
 
-pub fn executable_script(directory: &Path, name: &str, body: &str) -> PathBuf {
+pub(crate) fn executable_script(directory: &Path, name: &str, body: &str) -> PathBuf {
     let executable = directory.join(name);
     fs::write(&executable, format!("#!/bin/sh\n{body}\n")).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -327,7 +328,7 @@ async fn read_pids(path: &Path) -> (Pid, Pid) {
     .expect("run command did not write its process IDs")
 }
 
-pub async fn wait_until_gone(pid: Pid) {
+pub(crate) async fn wait_until_gone(pid: Pid) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match kill(pid, None) {

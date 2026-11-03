@@ -167,7 +167,7 @@ impl RunSettings {
     }
 }
 
-pub async fn run<T: MicroVmClient>(
+pub(super) async fn run<T: MicroVmClient>(
     options: RunOptions,
     config: &ProjectConfig,
     format: OutputFormat,
@@ -202,7 +202,7 @@ pub(crate) struct LaunchPlan {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RunResult {
+pub(super) struct RunResult {
     pub microvm_id: String,
     pub image_version: String,
     pub log_group: Option<String>,
