@@ -306,7 +306,7 @@ mod tests {
             script
         );
         assert_eq!(result.unwrap(), Outcome { detached: false });
-        assert!(out.is_empty());
+        assert_eq!(out, b"");
     }
 
     #[tokio::test(start_paused = true)]
@@ -394,7 +394,7 @@ mod tests {
         let mut out = Vec::new();
         let (result, ()) = tokio::join!(run(socket, &mut events, &mut out), script);
         assert!(result.is_ok());
-        assert!(out.is_empty());
+        assert_eq!(out, b"");
     }
 
     #[tokio::test(start_paused = true)]

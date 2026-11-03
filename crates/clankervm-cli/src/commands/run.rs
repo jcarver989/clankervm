@@ -450,7 +450,7 @@ mod tests {
             error.to_string().contains("run command is required"),
             "{error}"
         );
-        assert!(client.calls().is_empty());
+        assert_eq!(client.calls(), Vec::<Call>::new());
     }
 
     #[tokio::test]
@@ -503,7 +503,7 @@ mod tests {
         let error = launch_vm(&cli, &config, &client).await.unwrap_err();
 
         assert!(matches!(error, ClankerError::InvalidConfig(_)), "{error}");
-        assert!(client.calls().is_empty());
+        assert_eq!(client.calls(), Vec::<Call>::new());
     }
 
     #[tokio::test]

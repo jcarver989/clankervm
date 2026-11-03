@@ -48,7 +48,7 @@ fn client_retries_use_fresh_sdk_tokens_without_probing_or_printing_them() {
         &aws.url(),
     );
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("SENTINEL"));
     let requests = aws.finish();
     assert_eq!(requests.len(), 3);
