@@ -7,7 +7,7 @@ fn main() -> ExitCode {
     let mut project = Project::new();
     project.apply(
         RustMonorepo::new()
-            .rust(Rust::new("1.98"))
+            .rust(Rust::new("1.99").toolchain("1.99.1"))
             .workspace(
                 Workspace::new()
                     .members(["crates/*", ".framer"])
