@@ -1,4 +1,12 @@
-/target
 .env
 *.runtime.env
+
+# framer:begin framer
+/.framer/target/
+# framer:end framer
+
+# framer:begin rust-monorepo
+/target
+**/*.rs.bk
 .DS_Store
+# framer:end rust-monorepo

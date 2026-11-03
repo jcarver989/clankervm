@@ -16,3 +16,7 @@ publish = false
 name = "clankervm-server"
 release = true
 publish = false
+
+[[package]]
+name = "clankervm-framer"
+release = false
