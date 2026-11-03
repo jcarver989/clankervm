@@ -90,6 +90,30 @@ limit = 1000
 - Command-line settings override TOML settings, e.g. `--artifact-bucket` overrides `microvm.image.artifact.s3-bucket`.
 - Artifact sources are resolved relative to the project file, defaulting to `.`.
 
+### Environment variables
+
+String settings may reference environment variables as `${VAR}` or `$VAR`, so
+account-specific values like IAM roles and bucket names can stay out of a
+committed project file:
+
+```toml
+[aws]
+region = "us-west-2"
+profile = "${AWS_PROFILE}"
+expected-account-id = "${AWS_ACCOUNT_ID}"
+
+[microvm.image]
+iam-role = "arn:aws:iam::${AWS_ACCOUNT_ID}:role/clankervm-build"
+
+[microvm.image.artifact]
+s3-bucket = "my-artifacts-${AWS_ACCOUNT_ID}"
+```
+
+- Referencing an unset variable is an error; set it to an empty string to substitute nothing.
+- `$$` is a literal `$`.
+- Substituted values are not expanded again.
+- `command`, `environment` and `client` values are never expanded and are passed through verbatim, so `["/bin/sh", "-c", "echo $HOME"]` sees the MicroVM's `$HOME`, not yours.
+
 ## Multiple images
 
 Use one configuration file per image:

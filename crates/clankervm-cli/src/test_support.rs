@@ -2,6 +2,7 @@
 
 use crate::client::{LogEvent, MicroVmDetails, MicroVmSummary, Observation};
 use crate::config::ProjectConfig;
+use crate::vars::Vars;
 use aws_sdk_lambdamicrovms::types::{
     MicrovmImageState, MicrovmImageVersionState, MicrovmImageVersionStatus, MicrovmState,
 };
@@ -207,11 +208,20 @@ pub(crate) fn executable(directory: &Path, body: &str) -> PathBuf {
 /// Writes a real project file and loads it, so tests exercise the file schema
 /// and its precedence rules instead of a hand-built config.
 pub(crate) fn project(directory: &Path, sections: &str) -> ProjectConfig {
+    ProjectConfig::load_with(
+        &project_file(directory, sections),
+        None,
+        &Vars::with_values(&[]),
+    )
+    .unwrap()
+}
+
+pub(crate) fn project_file(directory: &Path, sections: &str) -> PathBuf {
     let path = directory.join("clankervm.toml");
     fs::write(
         &path,
         format!("[aws]\nregion = \"us-east-1\"\n[microvm]\nname = \"demo\"\n{sections}"),
     )
     .unwrap();
-    ProjectConfig::load(&path, None).unwrap()
+    path
 }
