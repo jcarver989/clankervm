@@ -167,7 +167,7 @@ impl RunSettings {
     }
 }
 
-pub async fn run<T: MicroVmClient>(
+pub(super) async fn run<T: MicroVmClient>(
     options: RunOptions,
     config: &ProjectConfig,
     format: OutputFormat,
@@ -202,7 +202,7 @@ pub(crate) struct LaunchPlan {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RunResult {
+pub(super) struct RunResult {
     pub microvm_id: String,
     pub image_version: String,
     pub log_group: Option<String>,
@@ -450,7 +450,7 @@ mod tests {
             error.to_string().contains("run command is required"),
             "{error}"
         );
-        assert!(client.calls().is_empty());
+        assert_eq!(client.calls(), Vec::<Call>::new());
     }
 
     #[tokio::test]
@@ -503,7 +503,7 @@ mod tests {
         let error = launch_vm(&cli, &config, &client).await.unwrap_err();
 
         assert!(matches!(error, ClankerError::InvalidConfig(_)), "{error}");
-        assert!(client.calls().is_empty());
+        assert_eq!(client.calls(), Vec::<Call>::new());
     }
 
     #[tokio::test]

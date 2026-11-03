@@ -62,7 +62,7 @@ impl ConnectOptions {
     }
 }
 
-pub async fn connect<T: MicroVmClient>(
+pub(super) async fn connect<T: MicroVmClient>(
     options: ConnectOptions,
     config: &ProjectConfig,
     format: OutputFormat,

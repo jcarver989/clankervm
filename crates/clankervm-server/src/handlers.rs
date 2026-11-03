@@ -9,11 +9,11 @@ use serde::Serialize;
 use std::sync::Arc;
 
 #[derive(Serialize)]
-pub struct StatusBody {
+pub(crate) struct StatusBody {
     status: &'static str,
 }
 
-pub async fn ready(State(state): State<Arc<HookServerState>>) -> impl IntoResponse {
+pub(crate) async fn ready(State(state): State<Arc<HookServerState>>) -> impl IntoResponse {
     if state.is_ready() {
         (StatusCode::OK, Json(StatusBody { status: "ready" }))
     } else {
@@ -26,7 +26,9 @@ pub async fn ready(State(state): State<Arc<HookServerState>>) -> impl IntoRespon
     }
 }
 
-pub async fn validate(State(state): State<Arc<HookServerState>>) -> Result<Response, ApiError> {
+pub(crate) async fn validate(
+    State(state): State<Arc<HookServerState>>,
+) -> Result<Response, ApiError> {
     if state.validate()? {
         Ok((
             StatusCode::OK,
@@ -46,7 +48,7 @@ pub async fn validate(State(state): State<Arc<HookServerState>>) -> Result<Respo
     }
 }
 
-pub async fn run(
+pub(crate) async fn run(
     State(state): State<Arc<HookServerState>>,
     request: Result<Json<RunHookRequest>, JsonRejection>,
 ) -> Result<Json<StatusBody>, ApiError> {
@@ -73,7 +75,7 @@ pub async fn run(
     Ok(Json(StatusBody { status: "accepted" }))
 }
 
-pub async fn terminate(State(state): State<Arc<HookServerState>>) -> Json<StatusBody> {
+pub(crate) async fn terminate(State(state): State<Arc<HookServerState>>) -> Json<StatusBody> {
     state.begin_shutdown();
     state.wait_for_completion().await;
     Json(StatusBody {
@@ -81,6 +83,6 @@ pub async fn terminate(State(state): State<Arc<HookServerState>>) -> Json<Status
     })
 }
 
-pub async fn not_found() -> Response {
+pub(crate) async fn not_found() -> Response {
     error_response(StatusCode::NOT_FOUND, "not found")
 }

@@ -88,7 +88,7 @@ fn shell_attaches_or_launches() {
     assert!(shell.microvm_id.is_none());
     assert!(!shell.keep);
     assert_eq!(shell.timeout, std::time::Duration::from_mins(5));
-    assert!(shell.run.arguments.is_empty());
+    assert_eq!(shell.run.arguments, Vec::<String>::new());
     assert!(shell.run.release.is_none());
     assert!(shell.run.settings.ingress.is_none());
 
@@ -174,7 +174,7 @@ fn shell_rejects_json_before_project_or_credential_setup() {
     ] {
         let output = run_cli(directory.path(), &arguments, "http://127.0.0.1:1");
         assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, b"");
         assert!(
             String::from_utf8_lossy(&output.stderr)
                 .contains("cannot be combined with --format json"),
@@ -737,7 +737,7 @@ fn list_rejects_an_image_arn_from_another_region() {
     );
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("is not in region `us-east-1`"),
         "{}",
@@ -960,7 +960,7 @@ fn logs_reports_the_id_and_group_when_no_stream_matches() {
         let output = run_cli(directory.path(), arguments, &fake.url());
 
         assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, b"");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains(&format!(
@@ -1010,7 +1010,7 @@ fn logs_checks_later_pages_for_ambiguity_before_reading() {
     ]);
     let output = run_cli(directory.path(), &["logs", LOG_MICROVM_ID], &fake.url());
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("multiple log streams"), "{stderr}");
     assert!(stderr.contains(LOG_STREAM), "{stderr}");

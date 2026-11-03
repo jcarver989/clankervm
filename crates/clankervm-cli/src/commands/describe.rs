@@ -8,7 +8,7 @@ pub struct CommandOptions {
     pub vm_id: String,
 }
 
-pub async fn describe<T: MicroVmClient>(
+pub(super) async fn describe<T: MicroVmClient>(
     options: CommandOptions,
     format: OutputFormat,
     client: &T,

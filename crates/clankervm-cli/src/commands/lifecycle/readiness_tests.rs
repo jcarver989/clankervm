@@ -24,7 +24,7 @@ async fn resumes_once_and_waits_for_the_readiness_check() {
     .await
     .unwrap();
 
-    assert!(!endpoint.is_empty());
+    assert_ne!(endpoint, "");
     assert_eq!(start.elapsed(), Duration::from_secs(10));
     assert_eq!(
         client.calls(),

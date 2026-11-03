@@ -658,7 +658,7 @@ mod tests {
                 .contains("cannot be combined with --format json"),
             "{error}"
         );
-        assert!(client.calls().is_empty());
+        assert_eq!(client.calls(), Vec::<Call>::new());
     }
 
     #[tokio::test]
@@ -671,7 +671,7 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, ClankerError::InvalidConfig(_)), "{error}");
-        assert!(client.calls().is_empty());
+        assert_eq!(client.calls(), Vec::<Call>::new());
     }
 
     #[test]

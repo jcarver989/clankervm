@@ -465,7 +465,7 @@ mod tests {
             error.to_string().contains("is not in region `us-east-1`"),
             "{error}"
         );
-        assert!(client.calls().is_empty());
+        assert_eq!(client.calls(), Vec::<Call>::new());
     }
 
     #[tokio::test]
@@ -484,7 +484,7 @@ mod tests {
                 matches!(error, ClankerError::InvalidConfig(_)),
                 "accepted {state:?}"
             );
-            assert!(client.calls().is_empty());
+            assert_eq!(client.calls(), Vec::<Call>::new());
         }
     }
 
