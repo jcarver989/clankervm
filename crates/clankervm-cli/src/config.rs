@@ -4,7 +4,7 @@ use crate::arn::Arn;
 use crate::client::{ImageConfiguration, ImageSpec};
 use crate::commands::{LogsSettings, PruneSettings, PushSettings, RunSettings, StatusSettings};
 use crate::payload::build_image_hook_payload;
-use crate::util::{parse_key_values, parse_release, validate_non_empty};
+use crate::util::{env_string, env_strings, parse_key_values, parse_release, validate_non_empty};
 use aws_sdk_lambdamicrovms::types::{HookState, Hooks, MicrovmHooks, MicrovmImageHooks, Resources};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -37,7 +37,9 @@ pub struct ProjectConfig {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct AwsConfig {
     pub region: String,
+    #[serde(default, deserialize_with = "env_string")]
     pub profile: Option<String>,
+    #[serde(default, deserialize_with = "env_string")]
     pub expected_account_id: Option<String>,
 }
 
@@ -66,7 +68,9 @@ struct ImageConfig {
     busy_timeout: Option<Duration>,
     minimum_memory_mib: Option<i32>,
     os_capabilities: Option<Vec<String>>,
+    #[serde(deserialize_with = "env_string")]
     iam_role: Option<String>,
+    #[serde(deserialize_with = "env_strings")]
     tags: Option<Vec<String>>,
     artifact: ArtifactConfig,
     network: ImageNetworkConfig,
@@ -78,7 +82,9 @@ struct ImageConfig {
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 struct ArtifactConfig {
     source: Option<PathBuf>,
+    #[serde(deserialize_with = "env_string")]
     s3_bucket: Option<String>,
+    #[serde(deserialize_with = "env_string")]
     s3_prefix: Option<String>,
 }
 
@@ -140,6 +146,7 @@ struct VersionsConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 struct RunConfig {
+    #[serde(deserialize_with = "env_string")]
     iam_role: Option<String>,
     command: Option<Vec<String>>,
     environment: Option<Vec<String>>,
@@ -861,5 +868,77 @@ iam-role = "arn:aws:iam::123456789012:role/run"
             directory.path().join("app")
         );
         assert_eq!(config.resolve(Path::new("/abs")), Path::new("/abs"));
+    }
+
+    #[test]
+    fn references_expand_in_account_specific_settings_only() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("clankervm.toml");
+        fs::write(
+            &path,
+            r#"[aws]
+region = "us-east-1"
+profile = "${CARGO_PKG_NAME}-profile"
+expected-account-id = "${CARGO_PKG_NAME}"
+[microvm]
+name = "demo"
+[microvm.image]
+iam-role = "arn:aws:iam::${CARGO_PKG_NAME}:role/build"
+tags = ["account=${CARGO_PKG_NAME}"]
+[microvm.image.artifact]
+s3-bucket = "artifacts-${CARGO_PKG_NAME}"
+s3-prefix = "${CARGO_PKG_NAME}/"
+[microvm.run]
+iam-role = "arn:aws:iam::${CARGO_PKG_NAME}:role/run"
+command = ["echo", "${CARGO_PKG_NAME}"]
+[microvm.run.logs]
+group = "/${CARGO_PKG_NAME}/microvms"
+"#,
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load(&path, None).unwrap();
+
+        let name = env!("CARGO_PKG_NAME");
+        assert_eq!(config.aws.profile, Some(format!("{name}-profile")));
+        assert_eq!(config.aws.expected_account_id.as_deref(), Some(name));
+        assert_eq!(
+            config.push.build_role_arn,
+            Some(format!("arn:aws:iam::{name}:role/build"))
+        );
+        assert_eq!(config.push.tags, Some(vec![format!("account={name}")]));
+        assert_eq!(
+            config.push.artifact_bucket,
+            Some(format!("artifacts-{name}"))
+        );
+        assert_eq!(config.push.artifact_prefix, Some(format!("{name}/")));
+        assert_eq!(
+            config.run.execution_role_arn,
+            Some(format!("arn:aws:iam::{name}:role/run"))
+        );
+        assert_eq!(config.logs.log_group, Some(format!("/{name}/microvms")));
+        assert_eq!(
+            config.run.command,
+            Some(vec!["echo".to_owned(), "${CARGO_PKG_NAME}".into()])
+        );
+    }
+
+    #[test]
+    fn unset_references_point_at_the_setting() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("clankervm.toml");
+        fs::write(
+            &path,
+            "[aws]\nregion = 'us-east-1'\n[microvm]\nname = 'demo'\n[microvm.image]\niam-role = '${CLANKERVM_TEST_UNSET}'\n",
+        )
+        .unwrap();
+
+        let error = ProjectConfig::load(&path, None).unwrap_err().to_string();
+
+        assert!(error.contains("line 6"), "{error}");
+        assert!(
+            error.contains("environment variable `CLANKERVM_TEST_UNSET` is not set"),
+            "{error}"
+        );
     }
 }
