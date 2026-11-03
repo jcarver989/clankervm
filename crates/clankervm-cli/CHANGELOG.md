@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.8...clankervm-v0.2.0) - 2026-11-03
+
+### Added
+
+- *(cli)* expand environment variables in project files ([#21](https://github.com/jcarver989/clankervm/pull/21))
+- *(cli)* remote commands for apps, connect --print-endpoint, multiple ingress connectors ([#20](https://github.com/jcarver989/clankervm/pull/20))
+- *(cli)* add standalone image version pruning ([#19](https://github.com/jcarver989/clankervm/pull/19))
+
+### Other
+
+- adopt framer and upgrade Rust to 1.99.1 ([#22](https://github.com/jcarver989/clankervm/pull/22))
+
 ## [0.1.8](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.7...clankervm-v0.1.8) - 2026-10-05
 
 ### Fixed

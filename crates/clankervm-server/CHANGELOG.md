@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/jcarver989/clankervm/compare/clankervm-server-v0.1.3...clankervm-server-v0.1.4) - 2026-11-03
+
+### Other
+
+- adopt framer and upgrade Rust to 1.99.1 ([#22](https://github.com/jcarver989/clankervm/pull/22))
+
 ## [0.1.3](https://github.com/jcarver989/clankervm/compare/clankervm-server-v0.1.2...clankervm-server-v0.1.3) - 2026-09-29
 
 ### Other
