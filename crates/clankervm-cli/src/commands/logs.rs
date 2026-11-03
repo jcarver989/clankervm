@@ -1,7 +1,7 @@
 use crate::client::{LogEvent, LogPage, LogQuery, LogWindow, MicroVmClient};
 use crate::config::{ProjectConfig, Settings};
 use crate::output::render;
-use crate::util::validate_non_empty;
+use crate::util::{env_string, validate_non_empty};
 use crate::{ClankerError, OutputFormat};
 use aws_smithy_types::DateTime;
 use clap::Args;
@@ -43,7 +43,7 @@ pub struct LogsOptions {
 pub struct LogsSettings {
     /// Log group to read; defaults to the group run streams to.
     #[arg(long)]
-    #[serde(rename = "group")]
+    #[serde(rename = "group", deserialize_with = "env_string")]
     pub log_group: Option<String>,
     /// Read events from this long before now, for example 30m.
     #[arg(long, value_parser = humantime::parse_duration)]

@@ -11,7 +11,6 @@ mod shell;
 #[cfg(test)]
 mod test_support;
 mod util;
-mod vars;
 
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;

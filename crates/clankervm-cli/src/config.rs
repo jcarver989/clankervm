@@ -4,23 +4,16 @@ use crate::arn::Arn;
 use crate::client::{ImageConfiguration, ImageSpec};
 use crate::commands::{LogsSettings, PruneSettings, PushSettings, RunSettings, StatusSettings};
 use crate::payload::build_image_hook_payload;
-use crate::util::{parse_key_values, parse_release, validate_non_empty};
-use crate::vars::{MissingVar, Vars};
+use crate::util::{env_string, env_strings, parse_key_values, parse_release, validate_non_empty};
 use aws_sdk_lambdamicrovms::types::{HookState, Hooks, MicrovmHooks, MicrovmImageHooks, Resources};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::num::NonZeroU16;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use toml::Spanned;
-use toml::de::{DeTable, DeValue, Deserializer as DocumentDeserializer};
-
-const VERBATIM_KEYS: [&str; 3] = ["command", "environment", "client"];
 
 /// Project configuration resolved into command settings, before CLI overrides.
 #[derive(Debug, Deserialize)]
@@ -44,7 +37,9 @@ pub struct ProjectConfig {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct AwsConfig {
     pub region: String,
+    #[serde(default, deserialize_with = "env_string")]
     pub profile: Option<String>,
+    #[serde(default, deserialize_with = "env_string")]
     pub expected_account_id: Option<String>,
 }
 
@@ -73,7 +68,9 @@ struct ImageConfig {
     busy_timeout: Option<Duration>,
     minimum_memory_mib: Option<i32>,
     os_capabilities: Option<Vec<String>>,
+    #[serde(deserialize_with = "env_string")]
     iam_role: Option<String>,
+    #[serde(deserialize_with = "env_strings")]
     tags: Option<Vec<String>>,
     artifact: ArtifactConfig,
     network: ImageNetworkConfig,
@@ -85,7 +82,9 @@ struct ImageConfig {
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 struct ArtifactConfig {
     source: Option<PathBuf>,
+    #[serde(deserialize_with = "env_string")]
     s3_bucket: Option<String>,
+    #[serde(deserialize_with = "env_string")]
     s3_prefix: Option<String>,
 }
 
@@ -147,6 +146,7 @@ struct VersionsConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default, rename_all = "kebab-case")]
 struct RunConfig {
+    #[serde(deserialize_with = "env_string")]
     iam_role: Option<String>,
     command: Option<Vec<String>>,
     environment: Option<Vec<String>>,
@@ -305,19 +305,14 @@ fn hook_seconds(duration: Option<Duration>, field: &str) -> Result<Option<i32>, 
 
 impl ProjectConfig {
     pub(crate) fn load(path: &Path, region: Option<String>) -> Result<Self, ClankerError> {
-        Self::load_with(path, region, &Vars::environment())
-    }
-
-    pub(crate) fn load_with(
-        path: &Path,
-        region: Option<String>,
-        vars: &Vars,
-    ) -> Result<Self, ClankerError> {
         let text = fs::read_to_string(path).map_err(|source| ClankerError::ConfigIo {
             path: path.to_owned(),
             source,
         })?;
-        let mut config = Self::parse(path, &text, vars)?;
+        let mut config: Self = toml::from_str(&text).map_err(|source| ClankerError::Config {
+            path: path.to_owned(),
+            source,
+        })?;
         if let Some(region) = region {
             config.aws.region = region;
         }
@@ -330,41 +325,6 @@ impl ProjectConfig {
         config.status.validate()?;
         config.logs.validate()?;
         Ok(config)
-    }
-
-    fn parse(path: &Path, text: &str, vars: &Vars) -> Result<Self, ClankerError> {
-        let invalid = |source| ClankerError::Config {
-            path: path.to_owned(),
-            source,
-        };
-        let mut document = DeTable::parse(text).map_err(invalid)?;
-        let mut expansion = Expansion {
-            vars,
-            keys: Vec::new(),
-            unset: Vec::new(),
-        };
-        expansion.table(document.get_mut());
-        if !expansion.unset.is_empty() {
-            expansion.unset.sort_by_key(|unset| unset.span.start);
-            let unset: Vec<String> = expansion
-                .unset
-                .iter()
-                .map(|unset| {
-                    let line = text[..unset.span.start].matches('\n').count() + 1;
-                    format!(
-                        "{}:{line}: `{}`: {}",
-                        path.display(),
-                        unset.key,
-                        unset.source
-                    )
-                })
-                .collect();
-            return Err(ClankerError::InvalidConfig(unset.join("\n")));
-        }
-        Self::deserialize(DocumentDeserializer::from(document)).map_err(|mut source| {
-            source.set_input(Some(text));
-            invalid(source)
-        })
     }
 
     pub(crate) fn resolve(&self, path: &Path) -> PathBuf {
@@ -461,55 +421,6 @@ impl ProjectConfig {
             )));
         }
         Ok(Some(version.to_owned()))
-    }
-}
-
-struct Expansion<'a> {
-    vars: &'a Vars,
-    keys: Vec<String>,
-    unset: Vec<UnsetReference>,
-}
-
-struct UnsetReference {
-    key: String,
-    span: Range<usize>,
-    source: MissingVar,
-}
-
-impl Expansion<'_> {
-    fn table(&mut self, table: &mut DeTable<'_>) {
-        for (key, value) in table.iter_mut() {
-            if VERBATIM_KEYS.contains(&key.get_ref().as_ref()) {
-                continue;
-            }
-            self.keys.push(key.get_ref().to_string());
-            self.value(value);
-            self.keys.pop();
-        }
-    }
-
-    fn value(&mut self, value: &mut Spanned<DeValue<'_>>) {
-        let span = value.span();
-        match value.get_mut() {
-            DeValue::String(text) => match self.vars.expand(text) {
-                Ok(expanded) => *text = Cow::Owned(expanded),
-                Err(source) => self.unset.push(UnsetReference {
-                    key: self.keys.join("."),
-                    span,
-                    source,
-                }),
-            },
-            DeValue::Array(items) => {
-                for item in items.iter_mut() {
-                    self.value(item);
-                }
-            }
-            DeValue::Table(table) => self.table(table),
-            DeValue::Integer(_)
-            | DeValue::Float(_)
-            | DeValue::Boolean(_)
-            | DeValue::Datetime(_) => {}
-        }
     }
 }
 
@@ -959,166 +870,75 @@ iam-role = "arn:aws:iam::123456789012:role/run"
         assert_eq!(config.resolve(Path::new("/abs")), Path::new("/abs"));
     }
 
-    const ACCOUNT_SECTIONS: &str = r#"
+    #[test]
+    fn references_expand_in_account_specific_settings_only() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("clankervm.toml");
+        fs::write(
+            &path,
+            r#"[aws]
+region = "us-east-1"
+profile = "${CARGO_PKG_NAME}-profile"
+expected-account-id = "${CARGO_PKG_NAME}"
+[microvm]
+name = "demo"
 [microvm.image]
-iam-role = "arn:aws:iam::${ACCOUNT}:role/build"
-tags = ["account=$ACCOUNT"]
+iam-role = "arn:aws:iam::${CARGO_PKG_NAME}:role/build"
+tags = ["account=${CARGO_PKG_NAME}"]
 [microvm.image.artifact]
-s3-bucket = "artifacts-${ACCOUNT}-us-east-1"
+s3-bucket = "artifacts-${CARGO_PKG_NAME}"
+s3-prefix = "${CARGO_PKG_NAME}/"
 [microvm.run]
-iam-role = "arn:aws:iam::${ACCOUNT}:role/run"
+iam-role = "arn:aws:iam::${CARGO_PKG_NAME}:role/run"
+command = ["echo", "${CARGO_PKG_NAME}"]
 [microvm.run.logs]
-group = "/${TEAM}/microvms"
-"#;
-
-    #[test]
-    fn references_expand_from_the_environment() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("clankervm.toml");
-        fs::write(
-            &path,
-            format!(
-                "[aws]\nregion = 'us-east-1'\nprofile = '${{PROFILE}}'\nexpected-account-id = '$ACCOUNT'\n[microvm]\nname = 'demo'\n{ACCOUNT_SECTIONS}"
-            ),
-        )
-        .unwrap();
-        let vars = Vars::with_values(&[
-            ("ACCOUNT", "123456789012"),
-            ("TEAM", "platform"),
-            ("PROFILE", "Production-PowerUser"),
-        ]);
-
-        let config = ProjectConfig::load_with(&path, None, &vars).unwrap();
-
-        assert_eq!(config.aws.profile.as_deref(), Some("Production-PowerUser"));
-        assert_eq!(
-            config.aws.expected_account_id.as_deref(),
-            Some("123456789012")
-        );
-        assert_eq!(
-            config.push.build_role_arn.as_deref(),
-            Some("arn:aws:iam::123456789012:role/build")
-        );
-        assert_eq!(
-            config.push.tags.as_deref(),
-            Some(&["account=123456789012".to_owned()][..])
-        );
-        assert_eq!(
-            config.push.artifact_bucket.as_deref(),
-            Some("artifacts-123456789012-us-east-1")
-        );
-        assert_eq!(
-            config.run.execution_role_arn.as_deref(),
-            Some("arn:aws:iam::123456789012:role/run")
-        );
-        assert_eq!(config.logs.log_group.as_deref(), Some("/platform/microvms"));
-    }
-
-    #[test]
-    fn process_settings_are_passed_through_verbatim() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = crate::test_support::project_file(
-            directory.path(),
-            r#"
-[microvm.image.hooks.ready]
-command = ["/bin/sh", "-c", "echo $HOME"]
-environment = ["CACHE=${HOME}/cache"]
-[microvm.run]
-command = ["/bin/sh", "-c", "echo ${HOME}"]
-environment = ["SHELL_HOME=$HOME", "PRICE=$$5"]
-[microvm.run.connect.app]
-port = 8080
-protocol = "http"
-client = ["open", "{url}#$HOME"]
+group = "/${CARGO_PKG_NAME}/microvms"
 "#,
-        );
-        let vars = Vars::with_values(&[("HOME", "/Users/local")]);
+        )
+        .unwrap();
 
-        let config = ProjectConfig::load_with(&path, None, &vars).unwrap();
+        let config = ProjectConfig::load(&path, None).unwrap();
 
+        let name = env!("CARGO_PKG_NAME");
+        assert_eq!(config.aws.profile, Some(format!("{name}-profile")));
+        assert_eq!(config.aws.expected_account_id.as_deref(), Some(name));
         assert_eq!(
-            config.run.command.as_deref(),
-            Some(&["/bin/sh".to_owned(), "-c".into(), "echo ${HOME}".into()][..])
+            config.push.build_role_arn,
+            Some(format!("arn:aws:iam::{name}:role/build"))
         );
+        assert_eq!(config.push.tags, Some(vec![format!("account={name}")]));
         assert_eq!(
-            config.run.environment.as_deref(),
-            Some(&["SHELL_HOME=$HOME".to_owned(), "PRICE=$$5".into()][..])
+            config.push.artifact_bucket,
+            Some(format!("artifacts-{name}"))
         );
-        assert_eq!(config.connections["app"].client, ["open", "{url}#$HOME"]);
-        let ready = config.ready.as_ref().unwrap();
-        assert_eq!(ready.command, ["/bin/sh", "-c", "echo $HOME"]);
-        assert_eq!(ready.environment, ["CACHE=${HOME}/cache"]);
-    }
-
-    #[test]
-    fn unset_references_name_the_key_and_line() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = crate::test_support::project_file(directory.path(), ACCOUNT_SECTIONS);
-
-        let error = ProjectConfig::load_with(&path, None, &Vars::with_values(&[("TEAM", "x")]))
-            .unwrap_err()
-            .to_string();
-
-        assert!(
-            error.ends_with(&format!(
-                "{path}:7: `microvm.image.iam-role`: environment variable `ACCOUNT` is not set\n\
-                 {path}:8: `microvm.image.tags`: environment variable `ACCOUNT` is not set\n\
-                 {path}:10: `microvm.image.artifact.s3-bucket`: environment variable `ACCOUNT` is not set\n\
-                 {path}:12: `microvm.run.iam-role`: environment variable `ACCOUNT` is not set",
-                path = path.display()
-            )),
-            "{error}"
+        assert_eq!(config.push.artifact_prefix, Some(format!("{name}/")));
+        assert_eq!(
+            config.run.execution_role_arn,
+            Some(format!("arn:aws:iam::{name}:role/run"))
+        );
+        assert_eq!(config.logs.log_group, Some(format!("/{name}/microvms")));
+        assert_eq!(
+            config.run.command,
+            Some(vec!["echo".to_owned(), "${CARGO_PKG_NAME}".into()])
         );
     }
 
     #[test]
-    fn double_dollar_escapes_a_literal_dollar() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = crate::test_support::project_file(
-            directory.path(),
-            "[microvm.image]\ntags = [\"cost=$$5\"]\n",
-        );
-
-        let config = ProjectConfig::load_with(&path, None, &Vars::with_values(&[])).unwrap();
-
-        assert_eq!(
-            config.push.tags.as_deref(),
-            Some(&["cost=$5".to_owned()][..])
-        );
-    }
-
-    #[test]
-    fn region_override_replaces_an_expanded_region() {
+    fn unset_references_point_at_the_setting() {
         let directory = tempfile::TempDir::new().unwrap();
         let path = directory.path().join("clankervm.toml");
         fs::write(
             &path,
-            "[aws]\nregion = '${REGION}'\n[microvm]\nname = 'demo'\n",
+            "[aws]\nregion = 'us-east-1'\n[microvm]\nname = 'demo'\n[microvm.image]\niam-role = '${CLANKERVM_TEST_UNSET}'\n",
         )
         .unwrap();
-        let vars = Vars::with_values(&[("REGION", "eu-west-1")]);
 
-        let expanded = ProjectConfig::load_with(&path, None, &vars).unwrap();
-        let overridden = ProjectConfig::load_with(&path, Some("us-west-2".into()), &vars).unwrap();
-
-        assert_eq!(expanded.aws.region, "eu-west-1");
-        assert_eq!(overridden.aws.region, "us-west-2");
-    }
-
-    #[test]
-    fn schema_errors_still_point_at_the_original_line() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = crate::test_support::project_file(
-            directory.path(),
-            "[microvm.image]\nunknown = \"${ACCOUNT}\"\n",
-        );
-
-        let error =
-            ProjectConfig::load_with(&path, None, &Vars::with_values(&[("ACCOUNT", "123")]))
-                .unwrap_err()
-                .to_string();
+        let error = ProjectConfig::load(&path, None).unwrap_err().to_string();
 
         assert!(error.contains("line 6"), "{error}");
-        assert!(error.contains("unknown = \"${ACCOUNT}\""), "{error}");
+        assert!(
+            error.contains("environment variable `CLANKERVM_TEST_UNSET` is not set"),
+            "{error}"
+        );
     }
 }

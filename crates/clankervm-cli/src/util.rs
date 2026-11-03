@@ -1,8 +1,16 @@
 use crate::ClankerError;
 use base16ct::lower::encode_string;
+use regex::{Captures, Regex};
+use serde::de::Error;
+use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::env;
+use std::sync::LazyLock;
 use std::time::Duration;
+
+static REFERENCE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid regex"));
 
 /// How often AWS is polled for asynchronous state changes.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -81,6 +89,45 @@ pub(crate) fn parse_key_values(
     Ok(pairs)
 }
 
+/// Replaces `${NAME}` references; substituted values are not expanded again.
+fn expand(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<String, String> {
+    let mut missing = None;
+    let expanded = REFERENCE.replace_all(text, |captures: &Captures| {
+        lookup(&captures[1]).unwrap_or_else(|| {
+            missing.get_or_insert_with(|| captures[1].to_owned());
+            String::new()
+        })
+    });
+    match missing {
+        Some(name) => Err(format!("environment variable `{name}` is not set")),
+        None => Ok(expanded.into_owned()),
+    }
+}
+
+fn expand_env(text: &str) -> Result<String, String> {
+    expand(text, |name| env::var(name).ok())
+}
+
+/// Deserializes an optional setting, expanding environment variable references.
+pub(crate) fn env_string<'de, T: Deserializer<'de>>(
+    deserializer: T,
+) -> Result<Option<String>, T::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|text| expand_env(&text))
+        .transpose()
+        .map_err(T::Error::custom)
+}
+
+/// Deserializes an optional list, expanding environment variable references.
+pub(crate) fn env_strings<'de, T: Deserializer<'de>>(
+    deserializer: T,
+) -> Result<Option<Vec<String>>, T::Error> {
+    Option::<Vec<String>>::deserialize(deserializer)?
+        .map(|items| items.iter().map(|text| expand_env(text)).collect())
+        .transpose()
+        .map_err(T::Error::custom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +149,40 @@ mod tests {
         assert!(parse_key_values(&empty, "tag", true).is_err());
         let environment = parse_key_values(&empty, "environment variable", false).unwrap();
         assert_eq!(environment.get("EMPTY").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn expand_substitutes_braced_references_once() {
+        let lookup = |name: &str| {
+            [
+                ("ACCOUNT", "123"),
+                ("ROLE", "run"),
+                ("EMPTY", ""),
+                ("NESTED", "${ROLE}"),
+            ]
+            .into_iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.to_owned())
+        };
+
+        for (text, expanded) in [
+            (
+                "arn:aws:iam::${ACCOUNT}:role/${ROLE}",
+                "arn:aws:iam::123:role/run",
+            ),
+            ("${ACCOUNT}${ROLE}", "123run"),
+            ("[${EMPTY}]", "[]"),
+            ("${NESTED}", "${ROLE}"),
+            (
+                "$ACCOUNT ${} ${unclosed {url}",
+                "$ACCOUNT ${} ${unclosed {url}",
+            ),
+        ] {
+            assert_eq!(expand(text, lookup).as_deref(), Ok(expanded), "{text}");
+        }
+        assert_eq!(
+            expand("${ACCOUNT}-${UNSET}", lookup),
+            Err("environment variable `UNSET` is not set".into())
+        );
     }
 }
