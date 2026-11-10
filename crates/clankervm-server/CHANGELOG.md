@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/jcarver989/clankervm/compare/clankervm-server-v0.1.4...clankervm-server-v0.1.5) - 2026-11-10
+
+### Added
+
+- stop the run command on suspend and restart it on resume ([#24](https://github.com/jcarver989/clankervm/pull/24))
+
 ## [0.1.4](https://github.com/jcarver989/clankervm/compare/clankervm-server-v0.1.3...clankervm-server-v0.1.4) - 2026-11-03
 
 ### Other
