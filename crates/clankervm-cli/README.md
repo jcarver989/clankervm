@@ -54,6 +54,7 @@ port = 9000
 ready-timeout = "5m"
 validate-timeout = "5m"
 run-timeout = "1m"
+suspend-timeout = "30s"
 terminate-timeout = "30s"
 
 [microvm.image.hooks.ready]
@@ -186,6 +187,14 @@ changes are not saved back into the seed snapshot. The command inherits the serv
 user/working directory and receives the configured AWS region, just like `ready`.
 Do not put secrets in its configuration, which is stored with the image. Both the CLI
 and the image's server binary must support validation.
+
+### Restart the run command across suspension
+
+Setting `microvm.image.hooks.suspend-timeout`, or `--suspend-timeout-seconds`, enables
+AWS's suspend and resume hooks. `clankervm-server` stops the run command before the
+MicroVM suspends and starts it again, with the same payload, when it resumes. The
+image's server binary must support these hooks; an older server answers them with
+HTTP 404.
 
 ## Check release status
 

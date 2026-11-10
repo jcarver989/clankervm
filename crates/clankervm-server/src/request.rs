@@ -11,7 +11,7 @@ pub struct RunHookRequest {
     pub run_hook_payload: RunHookPayload,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "RawRunHookPayload")]
 pub struct RunHookPayload {
     command: String,
@@ -44,6 +44,11 @@ enum ParseRunHookPayloadError {
 impl RunHookPayload {
     pub(crate) fn into_parts(self) -> (String, Vec<String>, BTreeMap<String, String>) {
         (self.command, self.args, self.environment)
+    }
+
+    pub(crate) fn with_environment(mut self, key: &str, value: String) -> Self {
+        self.environment.insert(key.to_string(), value);
+        self
     }
 }
 

@@ -1,16 +1,18 @@
 use crate::command::Command;
 use crate::error::ApiError;
 use crate::{HookServerError, RunHookPayload};
-use std::future::Future;
 use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::select;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct HookServerState {
     run_available: AtomicBool,
+    lifecycle: OnceLock<mpsc::Sender<LifecycleMessage>>,
     validation: Mutex<Validation>,
     ready: AtomicBool,
     initializing: Mutex<bool>,
@@ -18,6 +20,18 @@ pub(crate) struct HookServerState {
     terminate_grace_period: Duration,
     completion: watch::Sender<bool>,
     result: Mutex<Option<Result<(), HookServerError>>>,
+}
+
+type LifecycleMessage = (Lifecycle, oneshot::Sender<Result<(), ApiError>>);
+
+pub(crate) enum Lifecycle {
+    Suspend,
+    Resume,
+}
+
+struct Running {
+    stop: CancellationToken,
+    exited: JoinHandle<Result<(), HookServerError>>,
 }
 
 enum Validation {
@@ -31,6 +45,7 @@ impl HookServerState {
     pub(crate) fn new(terminate_grace_period: Duration) -> Arc<Self> {
         Arc::new(Self {
             run_available: AtomicBool::new(true),
+            lifecycle: OnceLock::new(),
             validation: Mutex::new(Validation::Disabled),
             ready: AtomicBool::new(true),
             initializing: Mutex::new(false),
@@ -119,8 +134,72 @@ impl HookServerState {
         self.cancellation.clone()
     }
 
-    pub(crate) fn terminate_grace_period(&self) -> Duration {
-        self.terminate_grace_period
+    pub(crate) fn start_run(self: &Arc<Self>, payload: RunHookPayload) -> Result<(), ApiError> {
+        let running = self
+            .spawn(&payload)
+            .map_err(|error| ApiError::initialization(self, error))?;
+        let (sender, messages) = mpsc::channel(1);
+        self.lifecycle
+            .set(sender)
+            .expect("run is claimed only once");
+        tokio::spawn(Arc::clone(self).supervise(payload, running, messages));
+        Ok(())
+    }
+
+    pub(crate) async fn lifecycle(&self, event: Lifecycle) -> Result<(), ApiError> {
+        let sender = self
+            .lifecycle
+            .get()
+            .ok_or_else(|| ApiError::conflict("run has not started"))?;
+        let stopping = || ApiError::conflict("hook server is stopping");
+        let (reply, response) = oneshot::channel();
+        sender.send((event, reply)).await.map_err(|_| stopping())?;
+        response.await.map_err(|_| stopping())?
+    }
+
+    async fn supervise(
+        self: Arc<Self>,
+        payload: RunHookPayload,
+        running: Running,
+        mut messages: mpsc::Receiver<LifecycleMessage>,
+    ) {
+        let mut running = Some(running);
+        loop {
+            select! {
+                result = async { (&mut running.as_mut().expect("guarded").exited).await },
+                    if running.is_some() =>
+                {
+                    return self.finish(result.expect("command task panicked"));
+                }
+                () = self.cancellation.cancelled(), if running.is_none() => {
+                    return self.finish(Ok(()));
+                }
+                Some((event, reply)) = messages.recv() => {
+                    let result = match (event, running.take()) {
+                        (Lifecycle::Suspend, Some(command)) => {
+                            command.stop.cancel();
+                            command.exited.await.expect("command task panicked")
+                        }
+                        (Lifecycle::Resume, None) => self.spawn(&payload).map(|command| {
+                            running = Some(command);
+                        }),
+                        (_, command) => {
+                            running = command;
+                            Ok(())
+                        }
+                    };
+                    let _ = reply.send(result.map_err(|error| ApiError::initialization(&self, error)));
+                }
+            }
+        }
+    }
+
+    fn spawn(&self, payload: &RunHookPayload) -> Result<Running, HookServerError> {
+        let (command, args, environment) = payload.clone().into_parts();
+        let command = Command::spawn(command, args, environment, self.terminate_grace_period)?;
+        let stop = self.cancellation.child_token();
+        let exited = tokio::spawn(command.wait(stop.clone()));
+        Ok(Running { stop, exited })
     }
 
     pub(crate) fn begin_shutdown(&self) {
@@ -149,15 +228,5 @@ impl HookServerState {
             *stored = Some(result);
             self.completion.send_replace(true);
         }
-    }
-
-    pub(crate) fn track_command<T>(self: &Arc<Self>, command_result: T)
-    where
-        T: Future<Output = Result<(), HookServerError>> + Send + 'static,
-    {
-        let state = Arc::clone(self);
-        tokio::spawn(async move {
-            state.finish(command_result.await);
-        });
     }
 }

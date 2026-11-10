@@ -1,7 +1,6 @@
-use crate::command::Command;
 use crate::error::{ApiError, error_response};
 use crate::request::RunHookRequest;
-use crate::state::HookServerState;
+use crate::state::{HookServerState, Lifecycle};
 use axum::extract::{Json, State, rejection::JsonRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -66,13 +65,27 @@ pub(crate) async fn run(
         return Err(ApiError::conflict("run already started"));
     }
 
-    let (command, args, mut environment) = request.run_hook_payload.into_parts();
-    environment.insert("AWS_LAMBDA_MICROVM_ID".to_string(), request.microvm_id);
-    let command = Command::spawn(command, args, environment, state.terminate_grace_period())
-        .map_err(|error| ApiError::initialization(&state, error))?;
-
-    state.track_command(command.wait(state.cancellation_token()));
+    let payload = request
+        .run_hook_payload
+        .with_environment("AWS_LAMBDA_MICROVM_ID", request.microvm_id);
+    state.start_run(payload)?;
     Ok(Json(StatusBody { status: "accepted" }))
+}
+
+pub(crate) async fn suspend(
+    State(state): State<Arc<HookServerState>>,
+) -> Result<Json<StatusBody>, ApiError> {
+    state.lifecycle(Lifecycle::Suspend).await?;
+    Ok(Json(StatusBody {
+        status: "suspended",
+    }))
+}
+
+pub(crate) async fn resume(
+    State(state): State<Arc<HookServerState>>,
+) -> Result<Json<StatusBody>, ApiError> {
+    state.lifecycle(Lifecycle::Resume).await?;
+    Ok(Json(StatusBody { status: "resumed" }))
 }
 
 pub(crate) async fn terminate(State(state): State<Arc<HookServerState>>) -> Json<StatusBody> {
