@@ -286,8 +286,11 @@ impl RunScript {
         })
     }
 
+    /// Waits for the next start of the command and returns its process IDs.
     pub(crate) async fn pids(&self) -> (Pid, Pid) {
-        read_pids(&self.pids).await
+        let pids = read_pids(&self.pids).await;
+        fs::remove_file(&self.pids).unwrap();
+        pids
     }
 
     pub(crate) fn was_terminated(&self) -> bool {

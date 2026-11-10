@@ -69,6 +69,8 @@ pub struct PushSettings {
     #[arg(long)]
     pub run_timeout_seconds: Option<i32>,
     #[arg(long)]
+    pub suspend_timeout_seconds: Option<i32>,
+    #[arg(long)]
     pub terminate_timeout_seconds: Option<i32>,
     #[arg(long, value_parser = humantime::parse_duration)]
     #[serde(with = "humantime_serde")]

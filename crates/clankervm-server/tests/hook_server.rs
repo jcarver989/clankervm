@@ -355,3 +355,56 @@ async fn terminate_kills_the_process_group_after_the_grace_period() {
 fn long_running_command() -> Value {
     json!({ "command": "/bin/sh", "args": ["-c", "exec sleep 60"] })
 }
+
+#[tokio::test]
+async fn suspend_stops_the_command_and_resume_starts_it_again() -> Result<(), HookServerError> {
+    let script = RunScriptBuilder::new("suspended-command").build();
+    let server = TestServerBuilder::new().start().await;
+    assert_eq!(server.run(script.payload()).await.status, StatusCode::OK);
+    let (command_pid, child_pid) = script.pids().await;
+
+    let suspend = server.post("/suspend").await;
+    assert_eq!(suspend.status, StatusCode::OK);
+    assert_eq!(suspend.body, json!({ "status": "suspended" }));
+    assert!(script.was_terminated());
+    wait_until_gone(command_pid).await;
+    wait_until_gone(child_pid).await;
+
+    let resume = server.post("/resume").await;
+    assert_eq!(resume.status, StatusCode::OK);
+    assert_eq!(resume.body, json!({ "status": "resumed" }));
+    let (command_pid, child_pid) = script.pids().await;
+
+    assert_eq!(server.post("/terminate").await.status, StatusCode::OK);
+    wait_until_gone(command_pid).await;
+    wait_until_gone(child_pid).await;
+    server.wait().await
+}
+
+#[tokio::test]
+async fn repeated_lifecycle_hooks_are_harmless_and_terminate_stops_a_suspended_server()
+-> Result<(), HookServerError> {
+    let server = TestServerBuilder::new().start().await;
+    assert_eq!(
+        server.run(long_running_command()).await.status,
+        StatusCode::OK
+    );
+
+    for hook in ["/resume", "/suspend", "/suspend"] {
+        assert_eq!(server.post(hook).await.status, StatusCode::OK);
+    }
+    assert_eq!(server.post("/terminate").await.status, StatusCode::OK);
+    server.wait().await
+}
+
+#[tokio::test]
+async fn lifecycle_hooks_conflict_before_the_run() -> Result<(), HookServerError> {
+    let server = TestServerBuilder::new().start().await;
+    for hook in ["/suspend", "/resume"] {
+        let response = server.post(hook).await;
+        assert_eq!(response.status, StatusCode::CONFLICT);
+        assert_eq!(response.body, json!({ "error": "run has not started" }));
+    }
+    assert_eq!(server.post("/terminate").await.status, StatusCode::OK);
+    server.wait().await
+}

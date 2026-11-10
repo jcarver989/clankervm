@@ -107,6 +107,8 @@ struct HooksConfig {
     #[serde(with = "humantime_serde")]
     run_timeout: Option<Duration>,
     #[serde(with = "humantime_serde")]
+    suspend_timeout: Option<Duration>,
+    #[serde(with = "humantime_serde")]
     terminate_timeout: Option<Duration>,
 }
 
@@ -259,6 +261,10 @@ impl TryFrom<ProjectFile> for ProjectConfig {
                     "validate-timeout",
                 )?,
                 run_timeout_seconds: hook_seconds(image.hooks.run_timeout, "run-timeout")?,
+                suspend_timeout_seconds: hook_seconds(
+                    image.hooks.suspend_timeout,
+                    "suspend-timeout",
+                )?,
                 terminate_timeout_seconds: hook_seconds(
                     image.hooks.terminate_timeout,
                     "terminate-timeout",
@@ -426,6 +432,9 @@ impl ProjectConfig {
 
 /// The hook configuration AWS accepts on both create and update.
 fn image_hooks(settings: &PushSettings, validate: bool) -> Hooks {
+    let suspend_and_resume = settings
+        .suspend_timeout_seconds
+        .map_or(HookState::Disabled, |_| HookState::Enabled);
     Hooks::builder()
         .port(settings.port())
         .microvm_image_hooks(
@@ -446,6 +455,9 @@ fn image_hooks(settings: &PushSettings, validate: bool) -> Hooks {
             MicrovmHooks::builder()
                 .run(HookState::Enabled)
                 .run_timeout_in_seconds(settings.run_timeout_seconds())
+                .suspend(suspend_and_resume.clone())
+                .set_suspend_timeout_in_seconds(settings.suspend_timeout_seconds)
+                .resume(suspend_and_resume)
                 .terminate(HookState::Enabled)
                 .terminate_timeout_in_seconds(settings.terminate_timeout_seconds())
                 .build(),
@@ -748,6 +760,11 @@ iam-role = "arn:aws:iam::123456789012:role/run"
         assert_eq!(push.ready_timeout_seconds, Some(300));
         assert_eq!(push.run_timeout_seconds, Some(60));
         assert_eq!(push.terminate_timeout_seconds, Some(30));
+        let hooks = image_hooks(push, false);
+        let microvm = hooks.microvm_hooks().unwrap();
+        assert_eq!(microvm.suspend(), &HookState::Enabled);
+        assert_eq!(microvm.suspend_timeout_in_seconds(), 30);
+        assert_eq!(microvm.resume(), &HookState::Enabled);
         assert_eq!(push.keep_versions, Some(10));
         assert_eq!(push.build_retries, Some(2));
         assert_eq!(config.image_busy_timeout, Some(Duration::from_mins(5)));
@@ -823,7 +840,12 @@ iam-role = "arn:aws:iam::123456789012:role/run"
 
     #[test]
     fn hook_durations_must_be_representable_as_integer_seconds() {
-        for field in ["ready-timeout", "run-timeout", "terminate-timeout"] {
+        for field in [
+            "ready-timeout",
+            "run-timeout",
+            "suspend-timeout",
+            "terminate-timeout",
+        ] {
             for value in ["'500ms'", "'2147483648s'", "'invalid'", "300", "'-1s'"] {
                 let text = format!("{CONFIG}\n[microvm.image.hooks]\n{field} = {value}");
                 assert!(

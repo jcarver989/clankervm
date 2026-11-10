@@ -1,4 +1,4 @@
-use crate::handlers::{not_found, ready, run, terminate, validate};
+use crate::handlers::{not_found, ready, resume, run, suspend, terminate, validate};
 use crate::state::HookServerState;
 use crate::{HookServerError, RunHookPayload};
 use axum::routing::post;
@@ -67,6 +67,8 @@ impl LambdaHookServer {
         let router = router
             .route(&format!("{BASE_PATH}/ready"), post(ready))
             .route(&format!("{BASE_PATH}/run"), post(run))
+            .route(&format!("{BASE_PATH}/suspend"), post(suspend))
+            .route(&format!("{BASE_PATH}/resume"), post(resume))
             .route(&format!("{BASE_PATH}/terminate"), post(terminate))
             .fallback(not_found)
             .method_not_allowed_fallback(not_found)
