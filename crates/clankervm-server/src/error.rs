@@ -56,13 +56,17 @@ impl ApiError {
         }
     }
 
-    pub(crate) fn initialization(state: &HookServerState, error: HookServerError) -> Self {
-        let message = error.to_string();
-        state.finish(Err(error));
+    pub(crate) fn command(error: &HookServerError) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message,
+            message: error.to_string(),
         }
+    }
+
+    pub(crate) fn initialization(state: &HookServerState, error: HookServerError) -> Self {
+        let response = Self::command(&error);
+        state.finish(Err(error));
+        response
     }
 }
 

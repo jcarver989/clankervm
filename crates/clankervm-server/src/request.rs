@@ -7,8 +7,9 @@ use thiserror::Error;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunHookRequest {
     pub microvm_id: String,
-    #[serde(deserialize_with = "deserialize_run_hook_payload")]
-    pub run_hook_payload: RunHookPayload,
+    /// The command to run. A MicroVM launched without one waits for a restart request.
+    #[serde(default, deserialize_with = "deserialize_run_hook_payload")]
+    pub run_hook_payload: Option<RunHookPayload>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -83,7 +84,11 @@ impl TryFrom<RawRunHookPayload> for RunHookPayload {
 
 fn deserialize_run_hook_payload<'a, T: Deserializer<'a>>(
     deserializer: T,
-) -> Result<RunHookPayload, T::Error> {
-    let encoded = String::deserialize(deserializer)?;
-    serde_json::from_str(&encoded).map_err(|_| DeError::custom("invalid runHookPayload JSON"))
+) -> Result<Option<RunHookPayload>, T::Error> {
+    match Option::<String>::deserialize(deserializer)? {
+        Some(encoded) if !encoded.is_empty() => serde_json::from_str(&encoded)
+            .map(Some)
+            .map_err(|_| DeError::custom("invalid runHookPayload JSON")),
+        _ => Ok(None),
+    }
 }

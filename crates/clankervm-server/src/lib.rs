@@ -8,7 +8,9 @@ mod request;
 mod state;
 use clap::Parser;
 pub use error::HookServerError;
-pub use lambda_hook_server::{BASE_PATH, DEFAULT_TERMINATE_GRACE_PERIOD, LambdaHookServer};
+pub use lambda_hook_server::{
+    BASE_PATH, DEFAULT_TERMINATE_GRACE_PERIOD, LambdaHookServer, RESTART_PATH,
+};
 pub use request::{RunHookPayload, RunHookRequest};
 use std::future::Future;
 use std::net::SocketAddr;

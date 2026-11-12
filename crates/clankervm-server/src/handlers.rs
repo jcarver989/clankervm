@@ -1,5 +1,5 @@
 use crate::error::{ApiError, error_response};
-use crate::request::RunHookRequest;
+use crate::request::{RunHookPayload, RunHookRequest};
 use crate::state::{HookServerState, Lifecycle};
 use axum::extract::{Json, State, rejection::JsonRejection};
 use axum::http::StatusCode;
@@ -65,11 +65,19 @@ pub(crate) async fn run(
         return Err(ApiError::conflict("run already started"));
     }
 
-    let payload = request
-        .run_hook_payload
-        .with_environment("AWS_LAMBDA_MICROVM_ID", request.microvm_id);
-    state.start_run(payload)?;
+    state.start_run(request.microvm_id, request.run_hook_payload)?;
     Ok(Json(StatusBody { status: "accepted" }))
+}
+
+pub(crate) async fn restart(
+    State(state): State<Arc<HookServerState>>,
+    request: Result<Json<RunHookPayload>, JsonRejection>,
+) -> Result<Json<StatusBody>, ApiError> {
+    let Json(command) = request.map_err(|_| ApiError::bad_request("invalid request JSON"))?;
+    state.lifecycle(Lifecycle::Restart(command)).await?;
+    Ok(Json(StatusBody {
+        status: "restarted",
+    }))
 }
 
 pub(crate) async fn suspend(

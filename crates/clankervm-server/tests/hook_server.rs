@@ -4,6 +4,7 @@ use clankervm_server::HookServerError;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::fs;
+use std::path::Path;
 use std::time::Duration;
 use support::{
     IGNORE_TERM_TRAP, RunScriptBuilder, TestServerBuilder, executable_script, run_request,
@@ -407,4 +408,123 @@ async fn lifecycle_hooks_conflict_before_the_run() -> Result<(), HookServerError
     }
     assert_eq!(server.post("/terminate").await.status, StatusCode::OK);
     server.wait().await
+}
+
+#[tokio::test]
+async fn run_without_a_command_waits_for_a_restart() -> Result<(), HookServerError> {
+    for body in [
+        json!({ "microvmId": "microvm-123" }),
+        json!({ "microvmId": "microvm-123", "runHookPayload": null }),
+        json!({ "microvmId": "microvm-123", "runHookPayload": "" }),
+    ] {
+        let script = RunScriptBuilder::new("restarted-command").build();
+        let server = TestServerBuilder::new().start().await;
+
+        let run = server.post_json("/run", body).await;
+        assert_eq!(run.status, StatusCode::OK);
+        assert_eq!(run.body, json!({ "status": "accepted" }));
+        assert_eq!(server.post("/ready").await.status, StatusCode::OK);
+
+        let restart = server.restart(script.payload()).await;
+        assert_eq!(restart.status, StatusCode::OK);
+        assert_eq!(restart.body, json!({ "status": "restarted" }));
+        let (command_pid, child_pid) = script.pids().await;
+
+        assert_eq!(server.post("/terminate").await.status, StatusCode::OK);
+        wait_until_gone(command_pid).await;
+        wait_until_gone(child_pid).await;
+        server.wait().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_server_run_without_a_command_outlives_the_commands_it_restarts()
+-> Result<(), HookServerError> {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("output");
+    let failing = executable_script(
+        directory.path(),
+        "failing-command",
+        "printf '%s' \"$AWS_LAMBDA_MICROVM_ID\" > \"$OUTPUT.partial\"\nmv \"$OUTPUT.partial\" \"$OUTPUT\"\nexit 7",
+    );
+    let script = RunScriptBuilder::new("next-command").build();
+    let server = TestServerBuilder::new().start().await;
+    let run = json!({ "microvmId": "microvm-123" });
+    assert_eq!(server.post_json("/run", run).await.status, StatusCode::OK);
+
+    let missing = server
+        .restart(json!({ "command": "/path/that/does/not/exist" }))
+        .await;
+    assert_eq!(missing.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(missing.body.get("error").is_some());
+
+    let failed = server
+        .restart(json!({ "command": failing, "environment": { "OUTPUT": output } }))
+        .await;
+    assert_eq!(failed.status, StatusCode::OK);
+    assert_eq!(read_when_written(&output).await, "microvm-123");
+
+    assert_eq!(
+        server.restart(script.payload()).await.status,
+        StatusCode::OK
+    );
+    script.pids().await;
+    assert_eq!(server.post("/terminate").await.status, StatusCode::OK);
+    server.wait().await
+}
+
+#[tokio::test]
+async fn restart_replaces_the_command_that_suspend_and_resume_manage() -> Result<(), HookServerError>
+{
+    let first = RunScriptBuilder::new("first-command").build();
+    let second = RunScriptBuilder::new("second-command").build();
+    let server = TestServerBuilder::new().start().await;
+    assert_eq!(server.run(first.payload()).await.status, StatusCode::OK);
+    let (command_pid, child_pid) = first.pids().await;
+
+    assert_eq!(
+        server.restart(second.payload()).await.status,
+        StatusCode::OK
+    );
+    assert!(first.was_terminated());
+    wait_until_gone(command_pid).await;
+    wait_until_gone(child_pid).await;
+    let (command_pid, child_pid) = second.pids().await;
+
+    assert_eq!(server.post("/suspend").await.status, StatusCode::OK);
+    wait_until_gone(command_pid).await;
+    wait_until_gone(child_pid).await;
+    assert_eq!(server.post("/resume").await.status, StatusCode::OK);
+    second.pids().await;
+
+    assert_eq!(server.post("/terminate").await.status, StatusCode::OK);
+    server.wait().await
+}
+
+#[tokio::test]
+async fn restart_rejects_invalid_commands_and_conflicts_before_the_run()
+-> Result<(), HookServerError> {
+    let server = TestServerBuilder::new().start().await;
+
+    for payload in [json!({}), json!({ "command": "" }), json!("run")] {
+        let response = server.restart(payload).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert!(response.body.get("error").is_some());
+    }
+    let conflict = server.restart(long_running_command()).await;
+    assert_eq!(conflict.status, StatusCode::CONFLICT);
+    assert_eq!(conflict.body, json!({ "error": "run has not started" }));
+
+    assert_eq!(server.post("/terminate").await.status, StatusCode::OK);
+    server.wait().await
+}
+
+async fn read_when_written(path: &Path) -> String {
+    loop {
+        if let Ok(contents) = fs::read_to_string(path) {
+            return contents;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
