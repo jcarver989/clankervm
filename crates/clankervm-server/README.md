@@ -38,6 +38,29 @@ aws lambda-microvms run-microvm \
   --run-hook-payload "$RUN_HOOK_PAYLOAD"
 ```
 
+## Replacing the run command
+
+Launch a MicroVM without `--run-hook-payload` and the server accepts the run hook and waits.
+Start a command later by sending the payload JSON above to `POST /clankervm/v1/restart` on the
+hook port, through the MicroVM's ingress:
+
+```sh
+curl -X POST "https://$MICROVM_ENDPOINT/clankervm/v1/restart" \
+  -H "X-aws-proxy-auth: $INGRESS_TOKEN" \
+  -H "X-aws-proxy-port: 9000" \
+  -H "Content-Type: application/json" \
+  -d '{ "command": "/usr/local/bin/my-agent", "environment": { "SESSION_TOKEN": "..." } }'
+```
+
+A restart stops the running command's process group, if there is one, and starts the new
+command, which is also the one a later resume starts. It returns HTTP 409 until the run hook
+has arrived. Use it to hand a long-lived MicroVM a new command or new credentials, such as a
+token that is reissued after every resume.
+
+A MicroVM launched with a run payload stops when its command exits, including a command a
+restart started. A MicroVM launched without one keeps running until it is terminated: a
+command that exits or fails to start leaves the server waiting for the next restart.
+
 ## Pre-snapshot initialization
 
 The CLI's `[microvm.image.hooks.ready]` table supplies an optional initialization

@@ -9,6 +9,9 @@ use tokio::select;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
+
+const MICROVM_ID: &str = "AWS_LAMBDA_MICROVM_ID";
 
 pub(crate) struct HookServerState {
     run_available: AtomicBool,
@@ -27,11 +30,19 @@ type LifecycleMessage = (Lifecycle, oneshot::Sender<Result<(), ApiError>>);
 pub(crate) enum Lifecycle {
     Suspend,
     Resume,
+    Restart(RunHookPayload),
 }
 
 struct Running {
     stop: CancellationToken,
     exited: JoinHandle<Result<(), HookServerError>>,
+}
+
+impl Running {
+    async fn stop(self) -> Result<(), HookServerError> {
+        self.stop.cancel();
+        self.exited.await.expect("command task panicked")
+    }
 }
 
 enum Validation {
@@ -134,15 +145,23 @@ impl HookServerState {
         self.cancellation.clone()
     }
 
-    pub(crate) fn start_run(self: &Arc<Self>, payload: RunHookPayload) -> Result<(), ApiError> {
-        let running = self
-            .spawn(&payload)
+    pub(crate) fn start_run(
+        self: &Arc<Self>,
+        microvm_id: String,
+        payload: Option<RunHookPayload>,
+    ) -> Result<(), ApiError> {
+        let payload =
+            payload.map(|payload| payload.with_environment(MICROVM_ID, microvm_id.clone()));
+        let running = payload
+            .as_ref()
+            .map(|payload| self.spawn(payload))
+            .transpose()
             .map_err(|error| ApiError::initialization(self, error))?;
         let (sender, messages) = mpsc::channel(1);
         self.lifecycle
             .set(sender)
             .expect("run is claimed only once");
-        tokio::spawn(Arc::clone(self).supervise(payload, running, messages));
+        tokio::spawn(Arc::clone(self).supervise(microvm_id, payload, running, messages));
         Ok(())
     }
 
@@ -159,36 +178,67 @@ impl HookServerState {
 
     async fn supervise(
         self: Arc<Self>,
-        payload: RunHookPayload,
-        running: Running,
+        microvm_id: String,
+        mut payload: Option<RunHookPayload>,
+        mut running: Option<Running>,
         mut messages: mpsc::Receiver<LifecycleMessage>,
     ) {
-        let mut running = Some(running);
+        // A run hook without a command leaves the server waiting for restarts, so the server
+        // outlives the commands they start.
+        let standby = payload.is_none();
+        let mut suspended = false;
         loop {
             select! {
                 result = async { (&mut running.as_mut().expect("guarded").exited).await },
                     if running.is_some() =>
                 {
-                    return self.finish(result.expect("command task panicked"));
+                    let result = result.expect("command task panicked");
+                    if !standby || self.cancellation.is_cancelled() {
+                        return self.finish(result);
+                    }
+                    if let Err(error) = result {
+                        warn!(%error, "run command stopped");
+                    }
+                    running = None;
                 }
                 () = self.cancellation.cancelled(), if running.is_none() => {
                     return self.finish(Ok(()));
                 }
                 Some((event, reply)) = messages.recv() => {
-                    let result = match (event, running.take()) {
-                        (Lifecycle::Suspend, Some(command)) => {
-                            command.stop.cancel();
-                            command.exited.await.expect("command task panicked")
-                        }
-                        (Lifecycle::Resume, None) => self.spawn(&payload).map(|command| {
-                            running = Some(command);
-                        }),
-                        (_, command) => {
-                            running = command;
-                            Ok(())
+                    let result = match event {
+                        Lifecycle::Suspend => match running.take() {
+                            Some(command) => {
+                                suspended = true;
+                                command.stop().await
+                            }
+                            None => Ok(()),
+                        },
+                        Lifecycle::Resume => match &payload {
+                            Some(payload) if mem::take(&mut suspended) => {
+                                self.spawn(payload).map(|command| running = Some(command))
+                            }
+                            _ => Ok(()),
+                        },
+                        Lifecycle::Restart(command) => {
+                            let stopped = match running.take() {
+                                Some(command) => command.stop().await,
+                                None => Ok(()),
+                            };
+                            suspended = false;
+                            let command = payload
+                                .insert(command.with_environment(MICROVM_ID, microvm_id.clone()));
+                            stopped
+                                .and_then(|()| self.spawn(command))
+                                .map(|command| running = Some(command))
                         }
                     };
-                    let _ = reply.send(result.map_err(|error| ApiError::initialization(&self, error)));
+                    let _ = reply.send(result.map_err(|error| {
+                        if standby {
+                            ApiError::command(&error)
+                        } else {
+                            ApiError::initialization(&self, error)
+                        }
+                    }));
                 }
             }
         }

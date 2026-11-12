@@ -1,4 +1,4 @@
-use crate::handlers::{not_found, ready, resume, run, suspend, terminate, validate};
+use crate::handlers::{not_found, ready, restart, resume, run, suspend, terminate, validate};
 use crate::state::HookServerState;
 use crate::{HookServerError, RunHookPayload};
 use axum::routing::post;
@@ -10,6 +10,9 @@ use tokio::net::TcpListener;
 use tokio::select;
 
 pub const BASE_PATH: &str = "/aws/lambda-microvms/runtime/v1";
+/// Path of the request that replaces the run command. Lambda never calls it: send it through
+/// the MicroVM's ingress.
+pub const RESTART_PATH: &str = "/clankervm/v1/restart";
 pub const DEFAULT_TERMINATE_GRACE_PERIOD: Duration = Duration::from_secs(20);
 
 /// HTTP server for AWS Lambda MicroVM lifecycle hooks.
@@ -70,6 +73,7 @@ impl LambdaHookServer {
             .route(&format!("{BASE_PATH}/suspend"), post(suspend))
             .route(&format!("{BASE_PATH}/resume"), post(resume))
             .route(&format!("{BASE_PATH}/terminate"), post(terminate))
+            .route(RESTART_PATH, post(restart))
             .fallback(not_found)
             .method_not_allowed_fallback(not_found)
             .with_state(Arc::clone(&self.state));

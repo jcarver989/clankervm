@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use clankervm_server::{BASE_PATH, HookServerError, LambdaHookServer};
+use clankervm_server::{BASE_PATH, HookServerError, LambdaHookServer, RESTART_PATH};
 use nix::errno::Errno;
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
@@ -63,6 +63,7 @@ impl TestServerBuilder {
         }
         let join = tokio::spawn(server.serve(listener));
         TestServer {
+            origin: format!("http://{address}"),
             base_url: format!("http://{address}{BASE_PATH}"),
             client: Client::new(),
             join,
@@ -107,6 +108,7 @@ impl TestServerBuilder {
 }
 
 pub(crate) struct TestServer {
+    origin: String,
     base_url: String,
     client: Client,
     join: JoinHandle<Result<(), HookServerError>>,
@@ -128,6 +130,11 @@ impl TestServer {
 
     pub(crate) async fn run(&self, payload: Value) -> TestResponse {
         self.post_json("/run", run_request(&payload)).await
+    }
+
+    pub(crate) async fn restart(&self, payload: Value) -> TestResponse {
+        let (method, body) = (Method::POST, Some(payload));
+        request(&self.client, &self.origin, method, RESTART_PATH, body).await
     }
 
     pub(crate) async fn post_json(&self, path: &str, body: Value) -> TestResponse {
