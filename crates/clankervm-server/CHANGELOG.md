@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/jcarver989/clankervm/compare/clankervm-server-v0.1.5...clankervm-server-v0.1.6) - 2026-11-12
+
+### Added
+
+- *(server)* run without a command and replace it with a restart request ([#25](https://github.com/jcarver989/clankervm/pull/25))
+
 ## [0.1.5](https://github.com/jcarver989/clankervm/compare/clankervm-server-v0.1.4...clankervm-server-v0.1.5) - 2026-11-10
 
 ### Added
