@@ -27,6 +27,8 @@ pub struct PushOptions {
     /// Prepared directory to ZIP or an existing ZIP file. Overrides microvm.image.artifact.source.
     #[arg(value_name = "PATH")]
     pub source: Option<PathBuf>,
+    #[arg(long)]
+    pub skip_unchanged: bool,
     #[command(flatten)]
     pub settings: PushSettings,
 }
@@ -214,6 +216,20 @@ async fn push<T: MicroVmClient, U: FnMut(&ReleaseStatus)>(
     })?;
     let spec = config.image_spec(&settings, &bundle.digest)?;
 
+    if options.skip_unchanged
+        && let Some(current) = client.observe(&spec.arn, None).await?
+        && current.is_ready()
+        && current.description.as_deref() == Some(spec.configuration.description.as_str())
+    {
+        eprintln!(
+            "› Version {} already has artifact {} and this configuration",
+            current.image_version,
+            &bundle.digest[..12]
+        );
+        let release = Release::new(&spec.name, spec.arn.clone(), &current.image_version);
+        return Ok(release.status(Some(&current)));
+    }
+
     eprintln!("› Publishing artifact {}", &bundle.digest[..12]);
 
     let mut retries_left = settings.build_retries();
@@ -331,7 +347,13 @@ mod tests {
         );
         assert_eq!(spec.tags.get("team").map(String::as_str), Some("platform"));
         assert_eq!(spec.configuration.hooks.port(), Some(9000));
-        assert_eq!(spec.configuration.description, format!("Bundle {digest}"));
+        assert!(
+            spec.configuration
+                .description
+                .starts_with(&format!("Bundle {digest} configuration ")),
+            "{}",
+            spec.configuration.description
+        );
         assert_eq!(
             arn.as_str(),
             "arn:aws:lambda:us-east-1:123456789012:microvm-image:demo"
@@ -362,9 +384,11 @@ mod tests {
         let Some(Call::Publish(spec)) = calls.get(1) else {
             return Err(format!("expected publish after prune, got {calls:?}").into());
         };
-        assert_eq!(
-            spec.configuration.description,
-            format!("Bundle {}", crate::util::sha256_hex(&expected))
+        let bundle = format!("Bundle {} ", crate::util::sha256_hex(&expected));
+        assert!(
+            spec.configuration.description.starts_with(&bundle),
+            "{}",
+            spec.configuration.description
         );
         Ok(())
     }
@@ -503,12 +527,113 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn push_skips_an_unchanged_image_when_asked() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let client = FakeMicroVmClient::default().observed([Ok(Some(Observation {
+            description: Some(description(&config, directory.path())?),
+            ..active("3")
+        }))]);
+
+        let result = push(&skipping_unchanged(), &config, &client, |_| {}).await?;
+
+        assert_eq!(result.release, "demo@3");
+        let calls = client.calls();
+        assert!(
+            matches!(calls.as_slice(), [Call::Observe(_, None)]),
+            "expected only the observe of the current version, got {calls:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn push_publishes_a_changed_bundle_when_asked_to_skip_unchanged() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let previous = description(&config, directory.path())?;
+        fs::write(directory.path().join("app.py"), "print('bye')")?;
+        let client = changed_client(previous);
+
+        let result = push(&skipping_unchanged(), &config, &client, |_| {}).await?;
+
+        assert_eq!(result.release, "demo@4");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn push_publishes_a_changed_configuration_when_asked_to_skip_unchanged() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let client = changed_client(description(&config, directory.path())?);
+        let options = PushOptions {
+            settings: PushSettings {
+                minimum_memory_mib: Some(4096),
+                ..PushSettings::default()
+            },
+            ..skipping_unchanged()
+        };
+
+        let result = push(&options, &config, &client, |_| {}).await?;
+
+        assert_eq!(result.release, "demo@4");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn push_publishes_over_a_failed_version_with_the_same_bundle() -> TestResult {
+        let directory = TempDir::new()?;
+        let config = project(directory.path())?;
+        let client = FakeMicroVmClient::default()
+            .published(published(&["4"]))
+            .observed([
+                Ok(Some(Observation {
+                    description: Some(description(&config, directory.path())?),
+                    ..failed("3")
+                })),
+                Ok(Some(active("4"))),
+            ]);
+
+        let result = push(&skipping_unchanged(), &config, &client, |_| {}).await?;
+
+        assert_eq!(result.release, "demo@4");
+        Ok(())
+    }
+
     fn project(directory: &Path) -> std::io::Result<ProjectConfig> {
         fs::write(directory.join("app.py"), "print('hi')")?;
         Ok(test_support::project(
             directory,
             "[microvm.image]\niam-role = \"arn:aws:iam::123456789012:role/build\"\ntags = [\"team=platform\"]\n[microvm.image.artifact]\ns3-bucket = \"artifacts\"\n[microvm.image.versions]\nmax = 1\n",
         ))
+    }
+
+    fn description(config: &ProjectConfig, directory: &Path) -> Result<String, Box<dyn Error>> {
+        let settings = config.push.merge(&PushSettings::default())?;
+        let digest = Artifact::load(directory)?.digest;
+        Ok(config
+            .image_spec(&settings, &digest)?
+            .configuration
+            .description)
+    }
+
+    fn changed_client(previous: String) -> FakeMicroVmClient {
+        FakeMicroVmClient::default()
+            .published(published(&["4"]))
+            .observed([
+                Ok(Some(Observation {
+                    description: Some(previous),
+                    ..active("3")
+                })),
+                Ok(Some(active("4"))),
+            ])
+    }
+
+    fn skipping_unchanged() -> PushOptions {
+        PushOptions {
+            skip_unchanged: true,
+            ..PushOptions::default()
+        }
     }
 
     fn active_client() -> FakeMicroVmClient {

@@ -1391,6 +1391,54 @@ fn push_prunes_nothing_before_the_first_release() {
 }
 
 #[test]
+fn push_skips_an_unchanged_image_when_asked() {
+    let directory = TempDir::new().unwrap();
+    write_config(directory.path(), PRUNING_CONFIG);
+    let first = FakeAws::start(vec![
+        Response::not_found(),
+        Response::ok("{}"),
+        Response::not_found(),
+        Response::ok(IMAGE_CREATING),
+        Response::ok(IMAGE_CREATED),
+        Response::ok(VERSION_ACTIVE),
+    ]);
+    run_json(
+        directory.path(),
+        &["--format", "json", "push", "--timeout", "5s"],
+        &first.url(),
+    );
+    let create = &first.finish()[3];
+    let body: Value =
+        serde_json::from_str(&create[create.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    let mut version: Value = serde_json::from_str(VERSION_ACTIVE).unwrap();
+    version["description"] = body["description"].clone();
+    let second = FakeAws::start(vec![
+        Response::ok(IMAGE_CREATED),
+        Response::ok(version.to_string()),
+    ]);
+
+    let result = run_json(
+        directory.path(),
+        &[
+            "--format",
+            "json",
+            "push",
+            "--skip-unchanged",
+            "--timeout",
+            "5s",
+        ],
+        &second.url(),
+    );
+
+    assert_eq!(result["release"], "demo@2");
+    let requests = second.finish();
+    assert!(
+        requests.iter().all(|request| request.starts_with("GET ")),
+        "{requests:#?}"
+    );
+}
+
+#[test]
 fn prune_keeps_as_many_launchable_versions_as_the_project_allows() {
     let (result, requests) = Pruning::prune(vec![pruning_versions("SUCCESSFUL", "ACTIVE")])
         .max(2)

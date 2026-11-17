@@ -2,6 +2,7 @@ use super::error::MicroVmClientError;
 use crate::ClankerError;
 use crate::arn::Arn;
 use crate::artifact::Artifact;
+use crate::util::sha256_hex;
 use aws_sdk_lambdamicrovms::types::{
     Capability, Hooks, MicrovmImageState, MicrovmImageVersionState, MicrovmImageVersionStatus,
     MicrovmState, Resources,
@@ -36,6 +37,25 @@ pub(crate) struct ImageSpec {
     pub artifact_prefix: String,
     pub tags: BTreeMap<String, String>,
     pub configuration: ImageConfiguration,
+}
+
+impl ImageConfiguration {
+    pub(crate) fn digest(&self) -> String {
+        let environment: BTreeMap<_, _> = self.environment_variables.iter().collect();
+        let fields = format!(
+            "{:?}",
+            (
+                &self.base_image_arn,
+                &self.build_role_arn,
+                &self.resources,
+                &self.capabilities,
+                &self.egress_network_connector,
+                &self.hooks,
+                environment,
+            )
+        );
+        sha256_hex(fields.as_bytes())
+    }
 }
 
 impl ImageSpec {
@@ -85,6 +105,7 @@ pub(crate) struct Observation {
     #[serde(serialize_with = "serialize_state")]
     pub version_status: MicrovmImageVersionStatus,
     pub state_reason: Option<String>,
+    pub description: Option<String>,
 }
 
 impl Observation {
@@ -133,6 +154,7 @@ impl Default for Observation {
             version_state: MicrovmImageVersionState::Pending,
             version_status: MicrovmImageVersionStatus::Inactive,
             state_reason: None,
+            description: None,
         }
     }
 }
