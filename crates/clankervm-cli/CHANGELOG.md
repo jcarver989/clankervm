@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.10...clankervm-v0.1.11) - 2026-11-17
+
+### Added
+
+- skip publishing an unchanged image with push --skip-unchanged ([#28](https://github.com/jcarver989/clankervm/pull/28))
+
 ## [0.1.10](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.9...clankervm-v0.1.10) - 2026-11-10
 
 ### Added
