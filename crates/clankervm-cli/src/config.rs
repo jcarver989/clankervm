@@ -379,22 +379,27 @@ impl ProjectConfig {
     ) -> Result<ImageSpec, ClankerError> {
         let region = &self.aws.region;
         let role = Arn::parse(settings.build_role_arn()?)?;
+        let mut configuration = ImageConfiguration {
+            base_image_arn: Arn::lambda(region, "aws", "microvm-image", settings.base_image())?,
+            build_role_arn: role.clone(),
+            description: String::new(),
+            resources: image_resources(settings)?,
+            capabilities: settings.capabilities()?,
+            egress_network_connector: Arn::network_connector(region, settings.egress())?,
+            hooks: image_hooks(settings, self.validate.is_some()),
+            environment_variables: self.image_environment()?,
+        };
+        configuration.description = format!(
+            "Bundle {bundle_digest} configuration {}",
+            configuration.digest()
+        );
         Ok(ImageSpec {
             arn: self.image_arn(&role)?,
             name: self.name.clone(),
             bucket: settings.artifact_bucket()?.to_owned(),
             artifact_prefix: settings.artifact_prefix().to_owned(),
             tags: settings.tags()?,
-            configuration: ImageConfiguration {
-                base_image_arn: Arn::lambda(region, "aws", "microvm-image", settings.base_image())?,
-                build_role_arn: role,
-                description: format!("Bundle {bundle_digest}"),
-                resources: image_resources(settings)?,
-                capabilities: settings.capabilities()?,
-                egress_network_connector: Arn::network_connector(region, settings.egress())?,
-                hooks: image_hooks(settings, self.validate.is_some()),
-                environment_variables: self.image_environment()?,
-            },
+            configuration,
         })
     }
 

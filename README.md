@@ -45,6 +45,7 @@ clankervm init --name NAME --region REGION [--force]
 clankervm push
 clankervm push path/to/image
 clankervm push path/to/image.zip
+clankervm push --skip-unchanged
 
 # Inspect a release
 clankervm status

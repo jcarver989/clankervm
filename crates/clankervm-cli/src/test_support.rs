@@ -62,6 +62,7 @@ fn observation(
         version_state,
         version_status,
         state_reason: None,
+        description: None,
     }
 }
 
