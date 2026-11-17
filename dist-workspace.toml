@@ -11,3 +11,7 @@ tap = "jcarver989/homebrew-tap"
 publish-jobs = ["homebrew"]
 install-path = "CARGO_HOME"
 install-updater = false
+
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-26"
+x86_64-apple-darwin = "macos-26-intel"
