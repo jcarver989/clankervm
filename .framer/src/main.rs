@@ -24,7 +24,12 @@ fn main() -> ExitCode {
                                 "x86_64-apple-darwin",
                                 "x86_64-unknown-linux-gnu",
                             ])
-                            .homebrew_tap("jcarver989/homebrew-tap"),
+                            .homebrew_tap("jcarver989/homebrew-tap")
+                            .set("github-custom-runners.aarch64-apple-darwin", "macos-26")
+                            .set(
+                                "github-custom-runners.x86_64-apple-darwin",
+                                "macos-26-intel",
+                            ),
                     ),
             ),
     );
