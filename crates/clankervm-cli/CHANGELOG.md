@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.11...clankervm-v0.1.12) - 2026-11-23
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.1.11](https://github.com/jcarver989/clankervm/compare/clankervm-v0.1.10...clankervm-v0.1.11) - 2026-11-17
 
 ### Added
