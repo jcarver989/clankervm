@@ -18,5 +18,10 @@ release = true
 publish = false
 
 [[package]]
+name = "clankervm-sigv4-proxy"
+release = true
+publish = false
+
+[[package]]
 name = "clankervm-framer"
 release = false

@@ -1,0 +1,42 @@
+[package]
+name = "clankervm-sigv4-proxy"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "HTTP proxy that signs requests for AWS endpoints with SigV4 in AWS Lambda MicroVMs"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["aws", "lambda", "microvm", "sigv4", "proxy"]
+categories = ["command-line-utilities", "development-tools"]
+
+[package.metadata.dist]
+dist = true
+targets = [
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+]
+
+[lints]
+workspace = true
+
+[dependencies]
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-sigv4 = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+futures-util = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+tokio = { workspace = true, features = ["io-util", "process", "sync"] }
