@@ -33,10 +33,18 @@ fn main() -> ExitCode {
                     ),
             ),
     );
-    let doc_valid_idents: Array = ["ClankerVM", "MicroVM", "MicroVMs", ".."]
-        .into_iter()
-        .map(Value::from)
-        .collect();
+    let doc_valid_idents: Array = [
+        "ClankerVM",
+        "MicroVM",
+        "MicroVMs",
+        "SigV4",
+        "AgentCore",
+        "CloudWatch",
+        "..",
+    ]
+    .into_iter()
+    .map(Value::from)
+    .collect();
     project
         .toml("clippy.toml")
         .set("doc-valid-idents", doc_valid_idents);

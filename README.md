@@ -97,6 +97,13 @@ clankervm --config images/worker.toml push
 See the [CLI usage reference](crates/clankervm-cli/README.md) for configuration
 fields, command options, and JSON output.
 
+## In the MicroVM
+
+Two binaries run inside the image rather than on your machine:
+
+- [`clankervm-server`](crates/clankervm-server/README.md) answers Lambda's lifecycle hooks and supervises your command.
+- [`clankervm-sigv4-proxy`](crates/clankervm-sigv4-proxy/README.md) signs HTTP requests for AWS endpoints as the MicroVM's execution role, for harnesses and tools that can't.
+
 ## Global options
 
 ```sh
